@@ -1,0 +1,17 @@
+{
+  "model": "claude-sonnet-5-5",
+  "maxTokens": 8192,
+  "maxTurns": 40,
+  "permissions": {
+    "mode": "ask",
+    "allow": [],
+    "denyCommands": ["\\bcurl\\b", "\\bwget\\b"]
+  },
+  "context": {
+    "maxTokens": 200000,
+    "compactAt": 0.8
+  },
+  "workspace": {
+    "allowOutside": false
+  }
+}
