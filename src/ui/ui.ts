@@ -16,6 +16,10 @@ export interface UI {
   stopSpinner(): void;
   confirm(request: PermissionRequest): Promise<PermissionAnswer>;
   hasPendingPrompt(): boolean;
+  /** Records a submitted user message. Line-based UIs already echo the prompt. */
+  addUserMessage(text: string): void;
+  /** Clears the visible conversation after /clear or /resume. */
+  resetTranscript(): void;
 }
 
 const SPINNER_FRAMES = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
@@ -142,6 +146,14 @@ export class TerminalUI implements UI {
 
   hasPendingPrompt(): boolean {
     return this.pendingQuestion;
+  }
+
+  addUserMessage(_text: string): void {
+    // The readline prompt already echoed the line.
+  }
+
+  resetTranscript(): void {
+    // The line-based REPL keeps no transcript to clear.
   }
 
   private activity(text: string, alwaysStderr = false): void {

@@ -33,6 +33,11 @@ describe('parseArgs', () => {
     expect(parseArgs(['--resume=abc']).resumeId).toBe('abc');
   });
 
+  it('parses --no-tui', () => {
+    expect(parseArgs([]).noTui).toBe(false);
+    expect(parseArgs(['--no-tui']).noTui).toBe(true);
+  });
+
   it('detects the config subcommand', () => {
     const args = parseArgs(['config']);
     expect(args.command).toBe('config');

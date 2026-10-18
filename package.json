@@ -1,6 +1,6 @@
 {
   "name": "nelo-code",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Nelo Code — an AI coding agent for your terminal.",
   "type": "module",
   "bin": {
@@ -32,7 +32,8 @@
     "cli",
     "claude",
     "anthropic",
-    "terminal"
+    "terminal",
+    "tui"
   ],
   "license": "MIT",
   "dependencies": {

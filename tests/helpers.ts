@@ -141,6 +141,10 @@ export class TestUI implements UI {
   hasPendingPrompt(): boolean {
     return false;
   }
+
+  addUserMessage(): void {}
+
+  resetTranscript(): void {}
 }
 
 export function dummyTool(

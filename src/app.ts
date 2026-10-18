@@ -7,13 +7,13 @@ import { buildSystemPrompt } from './prompt.js';
 import { newSession, SessionStore, type SessionData } from './session.js';
 import { createTools } from './tools/index.js';
 import type { Tool } from './types.js';
-import { TerminalUI } from './ui/ui.js';
+import { TerminalUI, type UI } from './ui/ui.js';
 
 export interface Runtime {
   config: Config;
   loaded: LoadedConfig;
   cwd: string;
-  ui: TerminalUI;
+  ui: UI;
   client: ModelClient;
   tools: Tool[];
   permissions: PermissionManager;
@@ -27,7 +27,7 @@ export function createRuntime(options: {
   config: Config;
   loaded: LoadedConfig;
   cwd: string;
-  ui: TerminalUI;
+  ui: UI;
   session?: SessionData | null;
 }): Runtime {
   const apiKey = resolveApiKey(options.config);
@@ -56,7 +56,7 @@ export function createRuntime(options: {
 
   const store = new SessionStore(options.cwd);
 
-  return {
+  const runtime: Runtime = {
     config: options.config,
     loaded: options.loaded,
     cwd: options.cwd,
@@ -68,12 +68,14 @@ export function createRuntime(options: {
     store,
     session,
     async saveSession(): Promise<void> {
-      session.messages = agent.messages;
-      session.usage = agent.usage;
-      session.model = options.config.model;
-      await store.save(session);
+      runtime.session.messages = agent.messages;
+      runtime.session.usage = agent.usage;
+      runtime.session.model = options.config.model;
+      await store.save(runtime.session);
     },
   };
+
+  return runtime;
 }
 
 export function resetSession(runtime: Runtime): void {

@@ -13,6 +13,8 @@ import {
 import { startRepl } from './repl.js';
 import { SessionStore, type SessionData } from './session.js';
 import { ansi, paint } from './ui/ansi.js';
+import { startTui } from './ui/tui/app.js';
+import { TuiUI } from './ui/tui/tui.js';
 import { TerminalUI } from './ui/ui.js';
 import { errorMessage } from './utils/text.js';
 import { readAllStdin } from './utils/stdin.js';
@@ -111,6 +113,8 @@ export async function main(): Promise<void> {
 
   const store = new SessionStore(cwd);
   let session: SessionData | null = null;
+  let notice: string | undefined;
+  const useTui = !args.noTui && process.stdin.isTTY === true && process.stdout.isTTY === true;
 
   if (args.resumeId) {
     session = await store.load(args.resumeId);
@@ -122,9 +126,9 @@ export async function main(): Promise<void> {
   } else if (args.continueSession) {
     session = await store.loadLatest();
     if (!session) {
-      console.error(
-        paint('! No previous session found for this project; starting a new one.', ansi.yellow),
-      );
+      const message = 'No previous session found for this project; starting a new one.';
+      if (useTui) notice = message;
+      else console.error(paint(`! ${message}`, ansi.yellow));
     }
   }
 
@@ -167,6 +171,27 @@ export async function main(): Promise<void> {
     } finally {
       process.off('SIGINT', onSigint);
     }
+    return;
+  }
+
+  if (useTui) {
+    const tui = new TuiUI();
+    try {
+      const runtime = createRuntime({
+        config: loaded.config,
+        loaded,
+        cwd,
+        ui: tui,
+        session,
+      });
+      await startTui(runtime, tui, { notice });
+    } catch (error) {
+      tui.stop();
+      console.error(paint(`✖ ${errorMessage(error)}`, ansi.red));
+      process.exitCode = 1;
+      return;
+    }
+    console.log('Session saved. Bye!');
     return;
   }
 

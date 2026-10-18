@@ -8,6 +8,7 @@ export interface CliArgs {
   model?: string;
   maxTokens?: number;
   mode?: PermissionMode;
+  noTui: boolean;
   help: boolean;
   version: boolean;
   command?: 'config';
@@ -19,6 +20,7 @@ export function parseArgs(argv: string[]): CliArgs {
   const args: CliArgs = {
     print: false,
     continueSession: false,
+    noTui: false,
     help: false,
     version: false,
   };
@@ -47,6 +49,8 @@ export function parseArgs(argv: string[]): CliArgs {
       args.mode = 'auto';
     } else if (arg === '--readonly') {
       args.mode = 'readonly';
+    } else if (arg === '--no-tui') {
+      args.noTui = true;
     } else if (arg === '-c' || arg === '--continue') {
       args.continueSession = true;
     } else if (arg === '-r' || arg === '--resume' || arg.startsWith('--resume=')) {
@@ -104,6 +108,7 @@ Options:
   -y, --yes                 Auto-approve all tool calls (dangerous)
       --readonly            Only allow read-only tools
       --mode <mode>         ask | auto | readonly
+      --no-tui              Use the plain line-based REPL instead of the TUI
       --max-tokens <n>      Max output tokens per model response
   -c, --continue            Resume the latest session for this project
   -r, --resume <id>         Resume a specific session
