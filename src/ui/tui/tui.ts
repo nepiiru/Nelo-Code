@@ -446,7 +446,11 @@ export class TuiUI implements UI {
       return;
     }
 
-    if (str && !key.ctrl && !key.meta && (key.name === undefined || key.name.length === 1)) {
+    // readline reports printable keys with a one-character `name`, except for
+    // space, whose name is "space". Accept that too so spaces can be typed.
+    const printable =
+      key.name === undefined || key.name.length === 1 || key.name === 'space';
+    if (str && !key.ctrl && !key.meta && printable) {
       this.editor.insert(str);
       this.requestRender();
     }

@@ -126,6 +126,27 @@ describe('TuiUI', () => {
     }
   });
 
+  it('inserts a space when the space key is pressed', async () => {
+    const { tui, stdin } = makeTui();
+    tui.start();
+
+    try {
+      const linePromise = tui.readLine();
+      stdin.emit('keypress', 'h', { name: 'h' });
+      stdin.emit('keypress', 'i', { name: 'i' });
+      // readline names the space key "space" rather than " ".
+      stdin.emit('keypress', ' ', { name: 'space' });
+      for (const char of 'there') {
+        stdin.emit('keypress', char, { name: char });
+      }
+      stdin.emit('keypress', '\r', { name: 'return' });
+
+      await expect(linePromise).resolves.toBe('hi there');
+    } finally {
+      tui.stop();
+    }
+  });
+
   it('exits on a double Ctrl+C when idle', async () => {
     const { tui, stdin } = makeTui();
     tui.start();
