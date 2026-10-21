@@ -138,7 +138,8 @@ export class LineEditor {
 
   submit(): string {
     const value = this.text.trim();
-    if (value) {
+    // Slash commands are actions, not prompts; keep them out of recall history.
+    if (value && !value.startsWith('/')) {
       this.history.push(value);
       if (this.history.length > 200) this.history.shift();
     }

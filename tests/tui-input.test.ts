@@ -69,6 +69,22 @@ describe('LineEditor', () => {
     expect(editor.cursor).toBe(0);
   });
 
+  it('keeps slash commands out of the recall history', () => {
+    const editor = new LineEditor();
+    editor.insert('/help');
+    expect(editor.submit()).toBe('/help');
+    editor.insert('/provider ollama');
+    expect(editor.submit()).toBe('/provider ollama');
+    editor.insert('hello');
+    expect(editor.submit()).toBe('hello');
+
+    expect(editor.historyLength).toBe(1);
+    editor.insert('draft');
+    expect(editor.historyPrevious()).toBe(true);
+    expect(editor.text).toBe('hello');
+    expect(editor.historyPrevious()).toBe(false);
+  });
+
   it('sanitizes newlines, tabs, ANSI, and control characters', () => {
     const editor = new LineEditor();
     editor.insert('a\nb\tc\x1b[31md\x07');
