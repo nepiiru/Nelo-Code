@@ -147,6 +147,82 @@ describe('TuiUI', () => {
     }
   });
 
+  it('shows slash-command completions as soon as "/" is typed', async () => {
+    const { tui, stdin, stdout } = makeTui();
+    tui.start();
+
+    try {
+      const linePromise = tui.readLine();
+      // readline reports "/" without a name property.
+      stdin.emit('keypress', '/', {});
+      await wait(60);
+
+      const output = stdout.text();
+      expect(output).toContain('/help');
+      expect(output).toContain('/provider');
+
+      stdin.emit('keypress', '\r', { name: 'return' });
+      await expect(linePromise).resolves.toBe('/help');
+    } finally {
+      tui.stop();
+    }
+  });
+
+  it('filters slash-command completions and completes with Tab', async () => {
+    const { tui, stdin, stdout } = makeTui();
+    tui.start();
+
+    try {
+      const linePromise = tui.readLine();
+      stdin.emit('keypress', '/', {});
+      for (const char of 'pro') stdin.emit('keypress', char, { name: char });
+      await wait(60);
+
+      const output = stdout.text();
+      expect(output).toContain('/provider');
+      expect(output).toContain('/providers');
+
+      stdin.emit('keypress', '\t', { name: 'tab' });
+      stdin.emit('keypress', '\r', { name: 'return' });
+      await expect(linePromise).resolves.toBe('/provider');
+    } finally {
+      tui.stop();
+    }
+  });
+
+  it('navigates slash-command completions with the arrow keys', async () => {
+    const { tui, stdin } = makeTui();
+    tui.start();
+
+    try {
+      const linePromise = tui.readLine();
+      stdin.emit('keypress', '/', {});
+      stdin.emit('keypress', '\x1b[B', { name: 'down' });
+      stdin.emit('keypress', '\t', { name: 'tab' });
+      stdin.emit('keypress', '\r', { name: 'return' });
+
+      await expect(linePromise).resolves.toBe('/clear');
+    } finally {
+      tui.stop();
+    }
+  });
+
+  it('closes the slash-command menu with Escape', async () => {
+    const { tui, stdin } = makeTui();
+    tui.start();
+
+    try {
+      const linePromise = tui.readLine();
+      stdin.emit('keypress', '/', {});
+      stdin.emit('keypress', '\x1b', { name: 'escape' });
+      stdin.emit('keypress', '\r', { name: 'return' });
+
+      await expect(linePromise).resolves.toBe('/');
+    } finally {
+      tui.stop();
+    }
+  });
+
   it('exits on a double Ctrl+C when idle', async () => {
     const { tui, stdin } = makeTui();
     tui.start();

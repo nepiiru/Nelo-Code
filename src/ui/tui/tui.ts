@@ -110,9 +110,10 @@ export interface TuiUIOptions {
  * Layout:
  *   header / separator / scrollable transcript / separator / input / status
  *
- * Keys: Enter submits, Up/Down history, PgUp/PgDn scroll, Shift+Up/Down
- * scroll one line, Ctrl+Home/End jump, Ctrl+C interrupts (twice to exit),
- * Ctrl+D exits on an empty prompt, Tab completes slash commands.
+ * Keys: Enter submits, Up/Down history (or menu selection), PgUp/PgDn scroll,
+ * Shift+Up/Down scroll one line, Ctrl+Home/End jump, Ctrl+C interrupts
+ * (twice to exit), Ctrl+D exits on an empty prompt. Typing "/" opens slash
+ * command completion; Tab completes and Enter runs the selection.
  */
 export class TuiUI implements UI {
   private readonly stdin: NodeJS.ReadStream;
@@ -138,6 +139,9 @@ export class TuiUI implements UI {
   private readonly queuedLines: string[] = [];
   private interruptHandler: (() => boolean) | null = null;
   private lastCtrlC = 0;
+
+  private slashIndex = 0;
+  private slashDismissed = false;
 
   private renderScheduled = false;
   private renderTimer: NodeJS.Timeout | null = null;
@@ -428,6 +432,31 @@ export class TuiUI implements UI {
       return;
     }
 
+    // While the slash-command menu is open, arrows move the selection.
+    if (this.slashMatches().length > 0) {
+      if (key.name === 'up') {
+        this.moveSlashSelection(-1);
+        return;
+      }
+      if (key.name === 'down') {
+        this.moveSlashSelection(1);
+        return;
+      }
+      if (key.name === 'tab') {
+        this.acceptSlashCompletion(false);
+        return;
+      }
+      if (key.name === 'escape') {
+        this.slashDismissed = true;
+        this.requestRender();
+        return;
+      }
+      if (key.name === 'enter' || key.name === 'return') {
+        this.acceptSlashCompletion(true);
+        return;
+      }
+    }
+
     if (key.name === 'enter' || key.name === 'return') {
       this.submit();
       return;
@@ -451,6 +480,8 @@ export class TuiUI implements UI {
     const printable =
       key.name === undefined || key.name.length === 1 || key.name === 'space';
     if (str && !key.ctrl && !key.meta && printable) {
+      this.slashIndex = 0;
+      this.slashDismissed = false;
       this.editor.insert(str);
       this.requestRender();
     }
@@ -488,9 +519,11 @@ export class TuiUI implements UI {
   private handleEditingKey(key: Key): boolean {
     switch (key.name) {
       case 'backspace':
+        this.resetSlashState();
         this.editor.backspace();
         return true;
       case 'delete':
+        this.resetSlashState();
         this.editor.delete();
         return true;
       case 'left':
@@ -506,8 +539,10 @@ export class TuiUI implements UI {
         this.editor.moveEnd();
         return true;
       case 'up':
+        this.resetSlashState();
         return this.editor.historyPrevious();
       case 'down':
+        this.resetSlashState();
         return this.editor.historyNext();
       default:
         break;
@@ -522,18 +557,61 @@ export class TuiUI implements UI {
       return true;
     }
     if (key.ctrl && key.name === 'u') {
+      this.resetSlashState();
       this.editor.deleteToStart();
       return true;
     }
     if (key.ctrl && key.name === 'k') {
+      this.resetSlashState();
       this.editor.deleteToEnd();
       return true;
     }
     if (key.ctrl && key.name === 'w') {
+      this.resetSlashState();
       this.editor.deleteWordBefore();
       return true;
     }
     return false;
+  }
+
+  private resetSlashState(): void {
+    this.slashIndex = 0;
+    this.slashDismissed = false;
+  }
+
+  /** Commands matching the current input, or none while it is not a command prefix. */
+  private slashMatches(includeDismissed = false): string[] {
+    if (!includeDismissed && this.slashDismissed) return [];
+    if (this.modal) return [];
+    const text = this.editor.text;
+    if (!text.startsWith('/') || text.includes(' ')) return [];
+    if (this.editor.cursor !== text.length) return [];
+    return SLASH_COMMANDS.filter((command) => command.startsWith(text));
+  }
+
+  private moveSlashSelection(delta: number): void {
+    const matches = this.slashMatches();
+    if (matches.length === 0) return;
+    const current = Math.min(this.slashIndex, matches.length - 1);
+    this.slashIndex = (current + delta + matches.length) % matches.length;
+    this.requestRender();
+  }
+
+  /** Completes the highlighted command; Enter also submits it. */
+  private acceptSlashCompletion(submit: boolean): void {
+    const matches = this.slashMatches(true);
+    const selected = matches[Math.min(this.slashIndex, matches.length - 1)];
+    if (!selected) return;
+
+    this.slashIndex = 0;
+    this.slashDismissed = false;
+    if (submit) {
+      this.editor.setText(selected);
+      this.submit();
+      return;
+    }
+    this.editor.setText(`${selected} `);
+    this.requestRender();
   }
 
   private handleCtrlC(): void {
@@ -544,6 +622,7 @@ export class TuiUI implements UI {
 
     if (this.editor.text.length > 0) {
       this.editor.clear();
+      this.resetSlashState();
       this.lastCtrlC = 0;
       this.setState('Ready', false);
       this.requestRender();
@@ -569,6 +648,7 @@ export class TuiUI implements UI {
 
   private submit(): void {
     const value = this.editor.submit();
+    this.resetSlashState();
     if (!value) {
       this.requestRender();
       return;
@@ -588,23 +668,7 @@ export class TuiUI implements UI {
   }
 
   private completeSlashCommand(): void {
-    const text = this.editor.text;
-    if (!text.startsWith('/')) return;
-
-    const matches = SLASH_COMMANDS.filter((command) => command.startsWith(text));
-    if (matches.length === 1) {
-      this.editor.setText(`${matches[0]} `);
-      return;
-    }
-    if (matches.length > 1) {
-      let prefix = matches[0] ?? '';
-      for (const match of matches) {
-        while (prefix.length > 0 && !match.startsWith(prefix)) {
-          prefix = prefix.slice(0, -1);
-        }
-      }
-      if (prefix.length > text.length) this.editor.setText(prefix);
-    }
+    this.acceptSlashCompletion(false);
   }
 
   private exit(): void {
@@ -693,6 +757,7 @@ export class TuiUI implements UI {
     let rows = 2; // input + status
     if (theme.layout.header) rows += 1;
     if (theme.layout.separators) rows += 2;
+    rows += Math.min(this.slashMatches().length, 6);
     return rows;
   }
 
@@ -774,6 +839,7 @@ export class TuiUI implements UI {
     if (theme.layout.separators) lines.push(separator);
     lines.push(...visible);
     if (theme.layout.separators) lines.push(separator);
+    lines.push(...this.renderCompletions(width));
     lines.push(this.renderInput(width));
     lines.push(this.renderStatus(width));
 
@@ -866,6 +932,26 @@ export class TuiUI implements UI {
       return `${left}${' '.repeat(width - leftWidth - rightWidth)}${right}`;
     }
     return truncateAnsi(left, width);
+  }
+
+  private renderCompletions(width: number): string[] {
+    const matches = this.slashMatches();
+    if (matches.length === 0) return [];
+
+    const maxVisible = 6;
+    const selected = Math.min(this.slashIndex, matches.length - 1);
+    const offset = Math.max(
+      0,
+      Math.min(selected - maxVisible + 1, Math.max(0, matches.length - maxVisible)),
+    );
+    const labelWidth = Math.max(1, Math.min(28, width - 4));
+
+    return matches.slice(offset, offset + maxVisible).map((command, position) => {
+      const isSelected = offset + position === selected;
+      const marker = isSelected ? paintToken('accent', glyph('prompt')) : ' ';
+      const label = command.padEnd(labelWidth).slice(0, labelWidth);
+      return `${marker} ${isSelected ? inverse(label) : dim(label)}`;
+    });
   }
 
   private renderInput(width: number): string {
