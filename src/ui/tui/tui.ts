@@ -108,7 +108,7 @@ export interface TuiUIOptions {
  * Full-screen terminal UI implementing the agent's UI interface.
  *
  * Layout:
- *   header / separator / scrollable transcript / separator / input / status
+ *   header / separator / scrollable transcript / separator / boxed input / status
  *
  * Keys: Enter submits, Up/Down history (or menu selection), PgUp/PgDn scroll,
  * Shift+Up/Down scroll one line, Ctrl+Home/End jump, Ctrl+C interrupts
@@ -188,14 +188,6 @@ export class TuiUI implements UI {
     (this.screen.stream as ResizableStream).on('resize', this.onResize);
     process.on('exit', this.onProcessExit);
 
-    const theme = getActiveTheme();
-    if (theme.layout.hints) {
-      this.pushInfo(
-        `Nelo Code v${getVersion()} — AI coding agent. Type /help for commands.`,
-        'plain',
-      );
-      this.pushInfo('PgUp/PgDn scroll · Ctrl+C interrupts · Ctrl+D exits', 'plain');
-    }
     this.requestRender();
   }
 
@@ -751,12 +743,13 @@ export class TuiUI implements UI {
     }
   }
 
-  /** Rows used by the header, rules, input line and status bar. */
+  /** Rows used by the header, rules, input box and status bar. */
   private chromeRows(): number {
     const theme = getActiveTheme();
-    let rows = 2; // input + status
+    let rows = 4; // boxed input (3 rows) + status
     if (theme.layout.header) rows += 1;
     if (theme.layout.separators) rows += 2;
+    if (this.modal) rows += 5;
     rows += Math.min(this.slashMatches().length, 6);
     return rows;
   }
@@ -810,7 +803,10 @@ export class TuiUI implements UI {
     }
 
     const transcriptHeight = this.transcriptHeight();
-    const all = this.buildTranscriptLines(width);
+    const all =
+      this.entries.length === 0
+        ? this.renderWelcome(transcriptHeight, width)
+        : this.buildTranscriptLines(width);
 
     if (this.lastWidth !== width) {
       this.lastWidth = width;
@@ -830,8 +826,6 @@ export class TuiUI implements UI {
     let visible = all.slice(start, end);
     while (visible.length < transcriptHeight) visible.unshift('');
 
-    if (this.modal) visible = this.overlayModal(visible, width);
-
     const separator = paintToken('border', glyph('separator').repeat(width));
     const lines: string[] = [];
 
@@ -839,8 +833,9 @@ export class TuiUI implements UI {
     if (theme.layout.separators) lines.push(separator);
     lines.push(...visible);
     if (theme.layout.separators) lines.push(separator);
+    if (this.modal) lines.push(...this.renderModal(width));
     lines.push(...this.renderCompletions(width));
-    lines.push(this.renderInput(width));
+    lines.push(...this.renderInput(width));
     lines.push(this.renderStatus(width));
 
     this.screen.render(lines.map((line) => truncateAnsi(line, width)));
@@ -861,6 +856,38 @@ export class TuiUI implements UI {
     return lines;
   }
 
+  private renderWelcome(height: number, width: number): string[] {
+    if (height <= 0) return [];
+    const theme = getActiveTheme();
+    if (!theme.layout.hints) return Array.from({ length: height }, () => '');
+
+    const title = `${paintToken('brand', glyph('brand'))}  ${bold(
+      paintToken('brand', 'N E L O   C O D E'),
+    )}`;
+    const subtitle = `${dim('AI coding agent')} ${paintToken('border', '·')} ${dim(
+      `v${getVersion()}`,
+    )}`;
+    const hints = [
+      `${paintToken('accent', '/')} ${dim('commands')}`,
+      `${paintToken('accentAlt', 'Enter')} ${dim('send')}`,
+      `${paintToken('accentAlt', 'Tab')} ${dim('complete')}`,
+    ].join(dim('   ·   '));
+    const card = ['', title, subtitle, '', hints, ''];
+
+    const top = Math.max(0, Math.floor((height - card.length) / 2));
+    const lines = Array.from({ length: top }, () => '');
+    lines.push(...card.map((line) => this.centerLine(line, width)));
+    while (lines.length < height) lines.push('');
+    return lines.slice(0, height);
+  }
+
+  private centerLine(line: string, width: number): string {
+    if (!line) return '';
+    const lineWidth = stringWidth(line);
+    if (lineWidth >= width) return truncateAnsi(line, width);
+    return `${' '.repeat(Math.floor((width - lineWidth) / 2))}${line}`;
+  }
+
   private entryLines(entry: Entry, width: number): string[] {
     if (entry.cache && entry.cache.width === width) return entry.cache.lines;
 
@@ -870,7 +897,9 @@ export class TuiUI implements UI {
       case 'user': {
         const wrapped = wrapText(stripAnsi(entry.text), Math.max(1, width - 2));
         lines = wrapped.map((line, index) =>
-          index === 0 ? `${paintToken('user', glyph('user'))} ${line}` : `  ${line}`,
+          index === 0
+            ? `${paintToken('accentAlt', glyph('user'))} ${paintToken('user', line)}`
+            : `  ${paintToken('user', line)}`,
         );
         break;
       }
@@ -882,16 +911,23 @@ export class TuiUI implements UI {
 
       case 'tool': {
         const frames = getActiveTheme().spinner;
+        const tone = entry.status === 'error' ? 'toolError' : 'tool';
         const icon =
           entry.status === 'running'
             ? paintToken('warning', frames[this.spinnerFrame % frames.length] ?? frames[0] ?? '*')
-            : paintToken(entry.status === 'error' ? 'toolError' : 'tool', glyph('tool'));
-        const summary = entry.summary ? paintToken('dim', `(${stripAnsi(entry.summary)})`) : '';
-        lines = [truncateAnsi(`${icon} ${bold(stripAnsi(entry.name))}${summary}`, width)];
+            : paintToken(tone, glyph('tool'));
+        const name = bold(paintToken(tone, stripAnsi(entry.name)));
+        const summary = entry.summary
+          ? `  ${paintToken('muted', stripAnsi(entry.summary))}`
+          : '';
+        lines = [truncateAnsi(`${icon} ${name}${summary}`, width)];
         if (entry.status !== 'running' && entry.detail) {
           const detail = stripAnsi(entry.detail);
-          const painted = entry.status === 'error' ? paintToken('danger', detail) : dim(detail);
-          lines.push(truncateAnsi(`  ${paintToken('dim', glyph('toolBranch'))} ${painted}`, width));
+          const painted =
+            entry.status === 'error' ? paintToken('danger', detail) : paintToken('muted', detail);
+          lines.push(
+            truncateAnsi(`  ${paintToken('border', glyph('toolBranch'))} ${painted}`, width),
+          );
         }
         break;
       }
@@ -922,13 +958,22 @@ export class TuiUI implements UI {
   }
 
   private renderHeader(width: number): string {
-    const left = `${paintToken('brand', glyph('brand'))} ${bold('Nelo Code')} ${dim(`v${getVersion()}`)}`;
-    const rightText = [this.status.model, this.status.mode, this.status.cwdLabel].filter(Boolean).join(' · ');
-    const right = rightText ? dim(rightText) : '';
+    const left = `${paintToken('brand', glyph('brand'))} ${bold(
+      paintToken('brand', 'Nelo Code'),
+    )} ${paintToken('dim', `v${getVersion()}`)}`;
+    const modeToken: 'danger' | 'info' | 'warning' =
+      this.status.mode === 'auto' ? 'danger' : this.status.mode === 'readonly' ? 'info' : 'warning';
+    const right = [
+      this.status.model ? paintToken('accentAlt', this.status.model) : '',
+      this.status.mode ? paintToken(modeToken, this.status.mode) : '',
+      this.status.cwdLabel ? paintToken('dim', this.status.cwdLabel) : '',
+    ]
+      .filter(Boolean)
+      .join(paintToken('border', ' · '));
     const leftWidth = stringWidth(left);
     const rightWidth = stringWidth(right);
 
-    if (leftWidth + rightWidth + 2 <= width) {
+    if (right && leftWidth + rightWidth + 2 <= width) {
       return `${left}${' '.repeat(width - leftWidth - rightWidth)}${right}`;
     }
     return truncateAnsi(left, width);
@@ -944,37 +989,51 @@ export class TuiUI implements UI {
       0,
       Math.min(selected - maxVisible + 1, Math.max(0, matches.length - maxVisible)),
     );
-    const labelWidth = Math.max(1, Math.min(28, width - 4));
+    const labelWidth = Math.max(1, Math.min(28, width - 6));
 
     return matches.slice(offset, offset + maxVisible).map((command, position) => {
       const isSelected = offset + position === selected;
       const marker = isSelected ? paintToken('accent', glyph('prompt')) : ' ';
       const label = command.padEnd(labelWidth).slice(0, labelWidth);
-      return `${marker} ${isSelected ? inverse(label) : dim(label)}`;
+      return `  ${marker} ${isSelected ? inverse(label) : dim(label)}`;
     });
   }
 
-  private renderInput(width: number): string {
+  private renderInput(width: number): string[] {
+    const inner = Math.max(1, width - 4);
     const prompt = `${paintToken('accent', glyph('prompt'))} `;
+    let content: string;
 
     if (this.modal) {
-      return truncateAnsi(
-        `${prompt}${dim('Respond to the permission prompt (y / n / a)')}`,
-        width,
-      );
-    }
-
-    if (this.editor.text.length === 0) {
+      content = `${prompt}${dim('Waiting for approval…')}`;
+    } else if (this.editor.text.length === 0) {
       const hint = this.running ? 'Type to queue the next message…' : 'Ask Nelo Code to do something…';
-      return truncateAnsi(`${prompt}${dim(hint)}`, width);
+      content = `${prompt}${dim(hint)}`;
+    } else {
+      content = `${prompt}${this.renderEditorText(Math.max(1, inner - 3))}`;
     }
 
-    const available = Math.max(1, width - 2);
+    const horizontal = glyph('boxHorizontal').repeat(Math.max(0, width - 2));
+    const top = paintToken(
+      'border',
+      `${glyph('boxTopLeft')}${horizontal}${glyph('boxTopRight')}`,
+    );
+    const bottom = paintToken(
+      'border',
+      `${glyph('boxBottomLeft')}${horizontal}${glyph('boxBottomRight')}`,
+    );
+    const vertical = paintToken('border', glyph('boxVertical'));
+    const row = `${vertical} ${padToWidth(truncateAnsi(content, inner), inner)} ${vertical}`;
+    return [top, row, bottom];
+  }
+
+  private renderEditorText(available: number): string {
+    const width = Math.max(1, available);
     const text = this.editor.text;
     const cursor = this.editor.cursor;
 
     let start = 0;
-    while (start < cursor && stringWidth(text.slice(start, cursor)) > available - 1) {
+    while (start < cursor && stringWidth(text.slice(start, cursor)) > width - 1) {
       const code = text.charCodeAt(start);
       start += code >= 0xd800 && code <= 0xdbff ? 2 : 1;
     }
@@ -984,7 +1043,7 @@ export class TuiUI implements UI {
     while (end < text.length) {
       const codePoint = text.codePointAt(end) ?? 0;
       const characterWidth = charWidth(codePoint);
-      if (used + characterWidth > available) break;
+      if (used + characterWidth > width) break;
       used += characterWidth;
       const code = text.charCodeAt(end);
       end += code >= 0xd800 && code <= 0xdbff ? 2 : 1;
@@ -1004,28 +1063,44 @@ export class TuiUI implements UI {
       index += character.length;
     }
     if (!cursorRendered) output += inverse(glyph('cursor'));
-
-    return truncateAnsi(`${prompt}${output}`, width);
+    return output;
   }
 
   private renderStatus(width: number): string {
     const theme = getActiveTheme();
     const frames = theme.spinner;
-    const spinner = this.busy ? `${frames[this.spinnerFrame % frames.length] ?? frames[0] ?? '*'} ` : '';
-    const left = `${spinner}${this.stateLabel}`;
+    const indicator = this.busy
+      ? frames[this.spinnerFrame % frames.length] ?? frames[0] ?? '*'
+      : glyph('state');
+    const stateColor: 'accent' | 'success' | 'warning' = this.busy
+      ? 'warning'
+      : this.running
+        ? 'accent'
+        : 'success';
+    const left = ` ${paintToken(stateColor, indicator)} ${paintToken(
+      this.busy ? 'warning' : 'muted',
+      this.stateLabel,
+    )}`;
 
     const candidates: string[] = [];
-    if (this.scrollOffset > 0) candidates.push(`${glyph('scroll')}${this.scrollOffset}`);
-    candidates.push(...this.vitals);
+    if (this.scrollOffset > 0) {
+      candidates.push(
+        `${paintToken('accentAlt', glyph('scroll'))}${paintToken('dim', String(this.scrollOffset))}`,
+      );
+    }
+    candidates.push(...this.vitals.map((vital) => paintToken('vitals', vital)));
     candidates.push(
-      `${formatTokenCount(this.status.usage.inputTokens)} in / ${formatTokenCount(
-        this.status.usage.outputTokens,
-      )} out`,
+      paintToken(
+        'dim',
+        `${formatTokenCount(this.status.usage.inputTokens)} in / ${formatTokenCount(
+          this.status.usage.outputTokens,
+        )} out`,
+      ),
     );
 
     const leftWidth = stringWidth(left);
     const parts = [...candidates];
-    const build = (): string => parts.join(' · ');
+    const build = (): string => parts.join(paintToken('border', ' · '));
     while (parts.length > 0 && leftWidth + stringWidth(build()) + 2 > width) {
       parts.pop();
     }
@@ -1044,34 +1119,49 @@ export class TuiUI implements UI {
     return padded;
   }
 
-  private overlayModal(visible: string[], width: number): string[] {
+  private renderModal(width: number): string[] {
     const modal = this.modal;
-    if (!modal) return visible;
+    if (!modal) return [];
 
     const boxWidth = Math.min(width - 4, 76);
     const inner = boxWidth - 4;
-    const name = stripAnsi(modal.request.tool.definition.name);
-    const summary = stripAnsi(modal.request.summary);
+    const horizontal = glyph('boxHorizontal');
+    const vertical = paintToken('border', glyph('boxVertical'));
+    const name = bold(paintToken('warning', stripAnsi(modal.request.tool.definition.name)));
+    const summaryText = stripAnsi(modal.request.summary);
+    const summary = summaryText ? ` ${paintToken('muted', summaryText)}` : '';
     const title = ' Permission required ';
-    const top = `┌${title}${'─'.repeat(Math.max(0, boxWidth - title.length - 2))}┐`;
-    const bottom = `└${'─'.repeat(boxWidth - 2)}┘`;
-    const row = (text: string): string => `│ ${padToWidth(text, inner)} │`;
+    const top = `${paintToken('border', `${glyph('boxTopLeft')}${horizontal}`)}${paintToken(
+      'warning',
+      title,
+    )}${paintToken(
+      'border',
+      `${horizontal.repeat(Math.max(0, boxWidth - title.length - 3))}${glyph('boxTopRight')}`,
+    )}`;
+    const bottom = paintToken(
+      'border',
+      `${glyph('boxBottomLeft')}${horizontal.repeat(Math.max(0, boxWidth - 2))}${glyph(
+        'boxBottomRight',
+      )}`,
+    );
+    const row = (text: string): string =>
+      `${vertical} ${padToWidth(truncateAnsi(text, inner), inner)} ${vertical}`;
+    const keys = [
+      `${paintToken('success', '[y]')} ${dim('Yes')}`,
+      `${paintToken('danger', '[n]')} ${dim('No')}`,
+      `${paintToken('info', '[a]')} ${dim('Always (session)')}`,
+    ].join('   ');
 
     const box = [
       top,
-      row(`${name}${summary ? `(${summary})` : ''}`),
-      row('Allow this tool call?'),
-      row('[y] Yes   [n] No   [a] Always (session)'),
+      row(`${name}${summary}`),
+      row(paintToken('text', 'Allow this tool call?')),
+      row(keys),
       bottom,
-    ].map((line) => paintToken('warning', truncateAnsi(line, boxWidth)));
+    ].map((line) => truncateAnsi(line, boxWidth));
 
     const leftPad = Math.max(0, Math.floor((width - boxWidth) / 2));
     const prefix = ' '.repeat(leftPad);
-    const result = [...visible];
-    const start = Math.max(0, result.length - box.length);
-    for (let index = 0; index < box.length; index += 1) {
-      result[start + index] = truncateAnsi(`${prefix}${box[index] ?? ''}`, width);
-    }
-    return result;
+    return box.map((line) => truncateAnsi(`${prefix}${line}`, width));
   }
 }

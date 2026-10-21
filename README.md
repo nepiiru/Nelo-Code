@@ -108,13 +108,15 @@ TTY 上ではフルスクリーン TUI が起動します。
 このテストはセッションの有効期限を固定値で比較しているため、時間帯によって
 失敗します。モッククロックを使うように修正します。
 
-● read_file(src/auth/session.test.ts)
-  └ 84 lines
-● edit_file(src/auth/session.test.ts)
-  └ 1 replacement
+▸ read_file  src/auth/session.test.ts
+  ╰ 84 lines
+▸ edit_file  src/auth/session.test.ts
+  ╰ 1 replacement
 ────────────────────────────────────────────────────────────────────────────
-❯ Ask Nelo Code to do something…
-Ready              CPU 18% · RAM 12.4G/31.9G · GPU 64% 7.1G/8.0G   12.3k in / 678 out
+╭──────────────────────────────────────────────────────────────────────────╮
+│ ❯ Ask Nelo Code to do something…                                         │
+╰──────────────────────────────────────────────────────────────────────────╯
+ ● Ready             CPU 18% · RAM 12.4G/31.9G · GPU 64% 7.1G/8.0G   12.3k in / 678 out
 ```
 
 | キー | 動作 |
@@ -221,9 +223,11 @@ nelo                        # 起動して /theme my-theme
 ```
 
 - `extends` で組み込みテーマ（`nelo` / `midnight` / `nord` / `mono` / `sakura`）を土台にできます。
+- 既定の `nelo` はネオン紫×シアンのパレット、角丸の入力ボックス、ウェルカム画面を使います。
 - 色は ANSI 名（`red` `brightCyan` `gray` …）または `#rrggbb`。
 - 探索パスは `~/.nelo/addons/*` と `./.nelo/addons/*`（プロジェクト側が優先）。
 - 編集中は `/theme reload` で即反映。壊れた JSON や未知のトークンは警告として表示され、UI は止まりません。
+- `layout.hints` は最初のメッセージを送る前のウェルカム画面の表示切り替えです。
 
 ### カラートークン
 
@@ -231,7 +235,7 @@ nelo                        # 起動して /theme my-theme
 
 ### グリフトークン
 
-`brand` `prompt` `user` `tool` `toolBranch` `separator` `warn` `error` `question` `cursor` `bullet` `scroll`
+`brand` `prompt` `user` `tool` `toolBranch` `separator` `warn` `error` `question` `cursor` `bullet` `scroll` `state` `boxTopLeft` `boxTopRight` `boxBottomLeft` `boxBottomRight` `boxHorizontal` `boxVertical`
 
 ### Markdown トークン
 

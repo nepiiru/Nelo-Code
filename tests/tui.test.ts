@@ -62,6 +62,11 @@ function makeTui(): { tui: TuiUI; stdin: FakeInput; stdout: FakeOutput } {
 
 const wait = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));
 
+function lastFrame(text: string): string {
+  const start = text.lastIndexOf('\x1b[?2026h');
+  return start >= 0 ? text.slice(start) : text;
+}
+
 describe('TuiUI', () => {
   it('renders the header, transcript, and status bar', async () => {
     const { tui, stdout } = makeTui();
@@ -87,11 +92,51 @@ describe('TuiUI', () => {
     }
   });
 
+  it('shows the welcome card and the boxed prompt before the first message', async () => {
+    const { tui, stdout } = makeTui();
+    tui.start();
+
+    try {
+      await wait(60);
+      let frame = lastFrame(stdout.text());
+      expect(frame).toContain('N E L O   C O D E');
+      expect(frame).toContain('AI coding agent');
+      expect(frame).toContain('╭');
+      expect(frame).toContain('Ask Nelo Code to do something…');
+
+      tui.addUserMessage('hello');
+      await wait(60);
+      frame = lastFrame(stdout.text());
+      expect(frame).not.toContain('N E L O   C O D E');
+      expect(frame).toContain('hello');
+    } finally {
+      tui.stop();
+    }
+  });
+
+  it('renders tool calls with theme glyphs', async () => {
+    const { tui, stdout } = makeTui();
+    tui.start();
+
+    try {
+      tui.toolStart('read_file', 'a.ts');
+      tui.toolEnd('read_file', '1 line', false);
+      await wait(60);
+
+      const frame = lastFrame(stdout.text());
+      expect(frame).toContain('▸ read_file');
+      expect(frame).toContain('╰ 1 line');
+    } finally {
+      tui.stop();
+    }
+  });
+
   it('resolves permission prompts from key presses', async () => {
     const { tui, stdin, stdout } = makeTui();
     tui.start();
 
     try {
+      tui.addUserMessage('keep me visible');
       const answerPromise = tui.confirm({
         tool: dummyTool('write_file', false),
         input: {},
@@ -99,8 +144,11 @@ describe('TuiUI', () => {
       });
 
       await wait(40);
-      expect(stdout.text()).toContain('Permission required');
-      expect(stdout.text()).toContain('write_file');
+      const frame = lastFrame(stdout.text());
+      expect(frame).toContain('Permission required');
+      expect(frame).toContain('write_file');
+      // The dialog gets its own rows instead of covering the transcript.
+      expect(frame).toContain('keep me visible');
 
       stdin.emit('keypress', 'a', { name: 'a' });
       await expect(answerPromise).resolves.toBe('always');

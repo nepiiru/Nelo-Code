@@ -48,6 +48,13 @@ export const GLYPH_TOKENS = [
   'cursor',
   'bullet',
   'scroll',
+  'state',
+  'boxTopLeft',
+  'boxTopRight',
+  'boxBottomLeft',
+  'boxBottomRight',
+  'boxHorizontal',
+  'boxVertical',
 ] as const;
 
 export type GlyphToken = (typeof GLYPH_TOKENS)[number];
@@ -59,7 +66,7 @@ export interface ThemeLayout {
   separators: boolean;
   /** How the status bar is drawn. */
   statusBar: 'inverse' | 'plain' | 'accent';
-  /** Show the startup hint lines in the transcript. */
+  /** Show the welcome card before the first message. */
   hints: boolean;
 }
 
@@ -206,6 +213,13 @@ const BASE_GLYPHS: Record<GlyphToken, string> = {
   cursor: ' ',
   bullet: '-',
   scroll: '↑',
+  state: '●',
+  boxTopLeft: '╭',
+  boxTopRight: '╮',
+  boxBottomLeft: '╰',
+  boxBottomRight: '╯',
+  boxHorizontal: '─',
+  boxVertical: '│',
 };
 
 const BASE_LAYOUT: ThemeLayout = {
@@ -264,7 +278,37 @@ function makeTheme(
 }
 
 export const BUILTIN_THEMES: Record<string, Theme> = {
-  nelo: makeTheme('nelo', 'Nelo', 'The default look: magenta brand, green tools, inverse status bar.', {}),
+  nelo: makeTheme('nelo', 'Nelo', 'Neon violet and cyan with a boxed prompt.', {
+    colors: {
+      brand: '#a78bfa',
+      accent: '#22d3ee',
+      accentAlt: '#f472b6',
+      text: '#e2e8f0',
+      muted: '#94a3b8',
+      dim: '#64748b',
+      success: '#34d399',
+      warning: '#fbbf24',
+      danger: '#fb7185',
+      info: '#60a5fa',
+      user: '#c4b5fd',
+      assistant: '#e2e8f0',
+      tool: '#22d3ee',
+      toolError: '#fb7185',
+      code: '#7dd3fc',
+      heading: '#f0abfc',
+      border: '#3f3f5a',
+      vitals: '#94a3b8',
+    },
+    glyphs: {
+      brand: '◆',
+      prompt: '❯',
+      tool: '▸',
+      toolBranch: '╰',
+      separator: '─',
+      state: '●',
+    },
+    layout: { statusBar: 'plain' },
+  }),
   midnight: makeTheme('midnight', 'Midnight', 'Cool blues and violets for late sessions.', {
     colors: {
       brand: '#8b9dff',
@@ -306,7 +350,21 @@ export const BUILTIN_THEMES: Record<string, Theme> = {
       ColorToken,
       string
     >,
-    glyphs: { brand: '[nelo]', prompt: '>', user: '>', tool: '*', toolBranch: '-', separator: '-' },
+    glyphs: {
+      brand: '[nelo]',
+      prompt: '>',
+      user: '>',
+      tool: '*',
+      toolBranch: '-',
+      separator: '-',
+      state: '*',
+      boxTopLeft: '+',
+      boxTopRight: '+',
+      boxBottomLeft: '+',
+      boxBottomRight: '+',
+      boxHorizontal: '-',
+      boxVertical: '|',
+    },
     spinner: ['|', '/', '-', '\\'],
     layout: { statusBar: 'plain', separators: true },
   }),
