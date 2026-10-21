@@ -24,7 +24,8 @@
     "test:e2e": "npm run build && node scripts/e2e.mjs",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "prepublishOnly": "npm run build",
-    "mock": "node scripts/mock-server.mjs"
+    "mock": "node scripts/mock-server.mjs",
+    "mock:openai": "node scripts/mock-openai.mjs"
   },
   "keywords": [
     "ai",

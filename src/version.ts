@@ -9,7 +9,8 @@ export function getVersion(): string {
   try {
     const here = dirname(fileURLToPath(import.meta.url));
     const raw = readFileSync(join(here, '..', 'package.json'), 'utf8');
-    const parsed = JSON.parse(raw) as { version?: unknown };
+    // package.json may carry a UTF-8 BOM depending on the editor/tooling that wrote it.
+    const parsed = JSON.parse(raw.replace(/^\uFEFF/, '')) as { version?: unknown };
     cached = typeof parsed.version === 'string' ? parsed.version : '0.0.0';
   } catch {
     cached = '0.0.0';

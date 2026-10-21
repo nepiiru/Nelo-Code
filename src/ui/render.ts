@@ -1,4 +1,5 @@
-import { ansi, paint } from './ansi.js';
+import { applyInlineMarkdown, balanceEdgeMarkers } from './inline.js';
+import { bold, getActiveTheme, paintToken } from './theme.js';
 
 /**
  * Line-buffered streaming renderer with lightweight markdown styling.
@@ -30,26 +31,31 @@ export class StreamRenderer {
 
   private styleLine(line: string): string {
     const trimmed = line.trimStart();
+    const theme = getActiveTheme().markdown;
 
     if (trimmed.startsWith('```')) {
       this.inCodeFence = !this.inCodeFence;
-      return paint(line, ansi.dim);
+      return paintToken(theme.fence, line);
     }
     if (this.inCodeFence) {
-      return paint(line, ansi.cyan);
+      return paintToken(theme.code, line);
     }
     if (/^#{1,6}\s/.test(trimmed)) {
-      return paint(line, ansi.bold);
+      return bold(paintToken(theme.heading, line));
     }
+    const styled = applyInlineMarkdown(balanceEdgeMarkers(line), theme);
     if (/^\s*[-*]\s+/.test(line)) {
-      return line.replace(/^(\s*)[-*]\s+/, (_match, indent: string) => `${indent}${paint('-', ansi.cyan)} `);
-    }
-    if (/^\s*\d+\.\s+/.test(line)) {
-      return line.replace(
-        /^(\s*)(\d+\.)\s+/,
-        (_match, indent: string, number: string) => `${indent}${paint(number, ansi.cyan)} `,
+      return styled.replace(
+        /^(\s*)[-*]\s+/,
+        (_match, indent: string) => `${indent}${paintToken(theme.bullet, '-')} `,
       );
     }
-    return line;
+    if (/^\s*\d+\.\s+/.test(line)) {
+      return styled.replace(
+        /^(\s*)(\d+\.)\s+/,
+        (_match, indent: string, number: string) => `${indent}${paintToken(theme.bullet, number)} `,
+      );
+    }
+    return styled;
   }
 }

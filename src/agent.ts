@@ -47,7 +47,7 @@ export class Agent {
   messages: Message[];
   usage: UsageTotals;
 
-  private readonly client: ModelClient;
+  private client: ModelClient;
   private readonly config: Config;
   private readonly tools: Tool[];
   private readonly permissions: PermissionManager;
@@ -65,6 +65,11 @@ export class Agent {
     this.workspaceRoot = options.workspaceRoot;
     this.messages = options.messages ?? [];
     this.usage = options.usage ?? emptyUsage();
+  }
+
+  /** Swaps the model backend without losing the conversation (used by /provider). */
+  setClient(client: ModelClient): void {
+    this.client = client;
   }
 
   load(messages: Message[], usage: UsageTotals): void {
@@ -227,6 +232,9 @@ export class Agent {
           system: this.systemPrompt,
           messages: this.messages,
           tools: this.tools.map((tool) => tool.definition),
+          temperature: this.config.sampling.temperature,
+          topP: this.config.sampling.topP,
+          timeoutMs: this.config.request.timeoutMs,
         },
         {
           onText: (delta) => {

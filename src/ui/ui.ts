@@ -1,6 +1,7 @@
 import type { PermissionAnswer, PermissionRequest } from '../permissions.js';
-import { ansi, colorEnabled, paint } from './ansi.js';
+import { colorEnabled } from './ansi.js';
 import { StreamRenderer } from './render.js';
+import { bold, dim, glyph, paintToken, spinnerFrames } from './theme.js';
 
 export interface UI {
   text(delta: string): void;
@@ -20,9 +21,9 @@ export interface UI {
   addUserMessage(text: string): void;
   /** Clears the visible conversation after /clear or /resume. */
   resetTranscript(): void;
+  /** Optional: repaint after the active theme changed. */
+  refreshTheme?(): void;
 }
-
-const SPINNER_FRAMES = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
 
 export interface TerminalUIOptions {
   stdout?: NodeJS.WriteStream;
@@ -61,27 +62,29 @@ export class TerminalUI implements UI {
 
   toolStart(name: string, summary: string): void {
     this.stopSpinner();
-    const suffix = summary ? paint(`(${summary})`, ansi.dim) : '';
-    this.activity(`${paint('●', ansi.green)} ${paint(name, ansi.bold)}${suffix}`);
+    const suffix = summary ? paintToken('dim', `(${summary})`) : '';
+    this.activity(`${paintToken('tool', glyph('tool'))} ${bold(name)}${suffix}`);
   }
 
   toolEnd(_name: string, summary: string, isError: boolean): void {
-    this.activity(`  ${paint('└', ansi.dim)} ${isError ? paint(summary, ansi.red) : paint(summary, ansi.dim)}`);
+    this.activity(
+      `  ${paintToken('dim', glyph('toolBranch'))} ${isError ? paintToken('danger', summary) : paintToken('dim', summary)}`,
+    );
   }
 
   info(message: string): void {
     this.stopSpinner();
-    this.activity(paint(message, ansi.dim));
+    this.activity(paintToken('dim', message));
   }
 
   warn(message: string): void {
     this.stopSpinner();
-    this.activity(paint(`! ${message}`, ansi.yellow));
+    this.activity(paintToken('warning', `${glyph('warn')} ${message}`));
   }
 
   error(message: string): void {
     this.stopSpinner();
-    this.activity(paint(`✖ ${message}`, ansi.red), true);
+    this.activity(paintToken('danger', `${glyph('error')} ${message}`), true);
   }
 
   raw(text: string): void {
@@ -90,19 +93,20 @@ export class TerminalUI implements UI {
   }
 
   stats(message: string): void {
-    this.activity(paint(`  ${message}`, ansi.gray));
+    this.activity(paintToken('muted', `  ${message}`));
   }
 
   spinner(label: string): void {
     this.stopSpinner();
     if (!this.interactive || this.stderr.isTTY !== true || !colorEnabled()) return;
 
+    const frames = spinnerFrames();
     this.spinnerLabel = label;
     this.spinnerFrame = 0;
     const render = (): void => {
-      const frame = SPINNER_FRAMES[this.spinnerFrame % SPINNER_FRAMES.length] ?? '⠋';
+      const frame = frames[this.spinnerFrame % frames.length] ?? frames[0] ?? '*';
       this.spinnerFrame += 1;
-      this.stderr.write(`\r\x1b[K${paint(frame, ansi.dim)} ${paint(this.spinnerLabel, ansi.dim)}`);
+      this.stderr.write(`\r\x1b[K${paintToken('dim', frame)} ${paintToken('dim', this.spinnerLabel)}`);
     };
     render();
     this.spinnerTimer = setInterval(render, 90);
@@ -128,14 +132,16 @@ export class TerminalUI implements UI {
     }
 
     this.stopSpinner();
-    const summary = request.summary ? ` ${paint(request.summary, ansi.dim)}` : '';
+    const summary = request.summary ? ` ${dim(request.summary)}` : '';
     this.activity('');
-    this.activity(`${paint('?', ansi.yellow)} ${paint(request.tool.definition.name, ansi.bold)}${summary}`);
-    this.activity(paint('  Allow this tool call? [y]es / [n]o / [a]lways (this session)', ansi.dim));
+    this.activity(
+      `${paintToken('warning', glyph('question'))} ${bold(request.tool.definition.name)}${summary}`,
+    );
+    this.activity(dim('  Allow this tool call? [y]es / [n]o / [a]lways (this session)'));
 
     this.pendingQuestion = true;
     try {
-      const answer = (await this.question(paint('  › ', ansi.dim))).trim().toLowerCase();
+      const answer = (await this.question(dim('  › '))).trim().toLowerCase();
       if (answer === 'y' || answer === 'yes') return 'yes';
       if (answer === 'a' || answer === 'always') return 'always';
       return 'no';

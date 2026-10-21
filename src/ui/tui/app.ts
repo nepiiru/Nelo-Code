@@ -2,6 +2,7 @@ import { basename } from 'node:path';
 import type { Runtime } from '../../app.js';
 import { describeApiError } from '../../client.js';
 import { handleSlashCommand, printTurnStats, runShellEscape } from '../../commands.js';
+import { vitalsSegments } from '../../system/resources.js';
 import type { TuiUI } from './tui.js';
 
 export async function startTui(
@@ -26,6 +27,13 @@ export async function startTui(
   };
 
   updateStatus();
+
+  if (runtime.config.ui.resources) {
+    runtime.monitor.start(runtime.config.ui.resourceIntervalMs, (snapshot) => {
+      tui.setVitals(vitalsSegments(snapshot));
+    });
+  }
+
   if (runtime.agent.messages.length > 0) {
     tui.info(
       `Resumed session ${runtime.session.id} (${runtime.agent.messages.length} messages, ${
@@ -93,6 +101,7 @@ export async function startTui(
       }
     }
   } finally {
+    runtime.monitor.stop();
     tui.setInterruptHandler(null);
     try {
       await runtime.saveSession();

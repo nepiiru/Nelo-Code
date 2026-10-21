@@ -1,4 +1,6 @@
 import Anthropic from '@anthropic-ai/sdk';
+import { OpenAIChatClient } from './client-openai.js';
+import type { ResolvedProvider } from './providers.js';
 import type { ContentBlock, Message, ToolDefinition, UsageTotals } from './types.js';
 
 export interface ModelRequest {
@@ -7,6 +9,9 @@ export interface ModelRequest {
   system: string;
   messages: Message[];
   tools: ToolDefinition[];
+  temperature?: number;
+  topP?: number;
+  timeoutMs?: number;
 }
 
 export interface StreamCallbacks {
@@ -51,6 +56,8 @@ export class AnthropicModelClient implements ModelClient {
         system: request.system,
         messages: request.messages as unknown as Anthropic.MessageParam[],
         tools: request.tools as unknown as Anthropic.Tool[],
+        ...(request.temperature !== undefined ? { temperature: request.temperature } : {}),
+        ...(request.topP !== undefined ? { top_p: request.topP } : {}),
       },
       signal ? { signal } : undefined,
     );
@@ -92,8 +99,53 @@ export function isAbortError(error: unknown): boolean {
   return name === 'AbortError' || name === 'APIUserAbortError';
 }
 
+function connectionCode(error: unknown): string | undefined {
+  if (!error || typeof error !== 'object') return undefined;
+  const cause = (error as { cause?: unknown }).cause;
+  if (cause && typeof cause === 'object') {
+    const code = (cause as { code?: unknown }).code;
+    if (typeof code === 'string') return code;
+  }
+  const code = (error as { code?: unknown }).code;
+  return typeof code === 'string' ? code : undefined;
+}
+
+/** Builds the client that matches the resolved provider. */
+export function createModelClient(
+  resolved: ResolvedProvider,
+  options: { timeoutMs?: number } = {},
+): ModelClient {
+  if (resolved.preset.kind === 'anthropic') {
+    return new AnthropicModelClient({
+      apiKey: resolved.apiKey ?? '',
+      ...(resolved.baseURL ? { baseURL: resolved.baseURL } : {}),
+    });
+  }
+
+  if (!resolved.baseURL) {
+    throw new Error(`Provider "${resolved.id}" needs a baseURL.`);
+  }
+
+  return new OpenAIChatClient({
+    baseURL: resolved.baseURL,
+    ...(resolved.apiKey ? { apiKey: resolved.apiKey } : {}),
+    ...(options.timeoutMs ? { timeoutMs: options.timeoutMs } : {}),
+  });
+}
+
 export function describeApiError(error: unknown): string {
   if (isAbortError(error)) return 'Request aborted.';
+
+  const code = connectionCode(error);
+  if (code === 'ECONNREFUSED' || code === 'ENOTFOUND' || code === 'EHOSTUNREACH') {
+    return (
+      'Could not reach the model server. Start it (for example "ollama serve") and check ' +
+      'the provider and baseURL. Run "nelo providers" to see the available templates.'
+    );
+  }
+  if (code === 'ECONNRESET' || code === 'EPIPE') {
+    return 'The model server closed the connection. It may have run out of memory; try a smaller model or context.';
+  }
 
   const status =
     typeof error === 'object' && error !== null && 'status' in error
@@ -103,7 +155,7 @@ export function describeApiError(error: unknown): string {
 
   switch (status) {
     case 401:
-      return 'Authentication failed (401). Check that ANTHROPIC_API_KEY is valid.';
+      return 'Authentication failed (401). Check that the API key is valid.';
     case 403:
       return 'Access denied (403). Your API key may not have access to this model.';
     case 404:
@@ -113,7 +165,7 @@ export function describeApiError(error: unknown): string {
     case 429:
       return 'Rate limited (429). Wait a moment and try again.';
     case 500:
-      return 'The API had an internal error (500). Try again shortly.';
+      return 'The model server had an internal error (500). Try again shortly.';
     case 529:
       return 'The API is overloaded (529). Try again shortly.';
     default:

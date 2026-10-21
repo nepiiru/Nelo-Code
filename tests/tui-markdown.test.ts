@@ -43,4 +43,24 @@ describe('formatMarkdown', () => {
   it('styles numbered list markers', () => {
     expect(formatMarkdown('1. first\n2. second', 40)).toEqual(['1. first', '2. second']);
   });
+
+  it('strips inline markers while keeping the text', () => {
+    expect(formatMarkdown('**bold** and `code` and *soft*', 60)).toEqual([
+      'bold and code and soft',
+    ]);
+  });
+
+  it('keeps inline markers out of wrapped lines', () => {
+    const lines = formatMarkdown(`**${'word '.repeat(6).trim()}**`, 12);
+    expect(lines.length).toBeGreaterThan(1);
+    for (const line of lines) {
+      expect(stripAnsi(line)).not.toContain('**');
+    }
+  });
+
+  it('renders links without the raw markdown syntax', () => {
+    expect(formatMarkdown('see [docs](https://example.com)', 60)).toEqual([
+      'see docs<https://example.com>',
+    ]);
+  });
 });

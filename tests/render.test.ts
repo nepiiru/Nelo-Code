@@ -53,4 +53,16 @@ describe('StreamRenderer', () => {
     expect(stream.output).toContain('- item');
     expect(stream.output).toContain('const a = 1;');
   });
+
+  it('drops inline markers but keeps fenced code verbatim', () => {
+    const stream = new MemoryStream();
+    const renderer = new StreamRenderer(stream as unknown as NodeJS.WriteStream);
+
+    renderer.push('**bold** and `code`\n```\n**raw**\n```\n');
+    renderer.flush();
+
+    expect(stream.output).toContain('bold and code');
+    expect(stream.output).not.toContain('**bold**');
+    expect(stream.output).toContain('**raw**');
+  });
 });

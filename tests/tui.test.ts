@@ -1,6 +1,7 @@
 import { EventEmitter } from 'node:events';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { TuiUI } from '../src/ui/tui/tui.js';
+import { BUILTIN_THEMES, setActiveTheme } from '../src/ui/theme.js';
 import { dummyTool } from './helpers.js';
 
 class FakeInput extends EventEmitter {
@@ -154,6 +155,42 @@ describe('TuiUI', () => {
       await expect(linePromise).resolves.toBe('y');
     } finally {
       tui.stop();
+    }
+  });
+
+  it('shows resource vitals in the status bar', async () => {
+    const { tui, stdout } = makeTui();
+    tui.updateStatus({ model: 'local-model', mode: 'ask', cwdLabel: 'project' });
+    tui.start();
+
+    try {
+      tui.setVitals(['CPU 12%', 'RAM 9.5G/32.0G', 'GPU 71% 4.0G/12.0G']);
+      await wait(60);
+
+      const output = stdout.text();
+      expect(output).toContain('CPU 12%');
+      expect(output).toContain('RAM 9.5G/32.0G');
+      expect(output).toContain('GPU 71% 4.0G/12.0G');
+    } finally {
+      tui.stop();
+    }
+  });
+
+  it('repaints the transcript after a theme change', async () => {
+    const { tui, stdout } = makeTui();
+    tui.start();
+
+    try {
+      tui.addUserMessage('hello');
+      tui.setTheme(BUILTIN_THEMES.mono!);
+      await wait(60);
+
+      const output = stdout.text();
+      expect(output).toContain('hello');
+      expect(output).toContain('[nelo]');
+    } finally {
+      tui.stop();
+      setActiveTheme(BUILTIN_THEMES.nelo!);
     }
   });
 });

@@ -5,6 +5,30 @@ import { errorMessage } from './utils/text.js';
 
 export type PermissionMode = 'ask' | 'auto' | 'readonly';
 
+export type ProviderId =
+  | 'auto'
+  | 'anthropic'
+  | 'openai'
+  | 'openrouter'
+  | 'omniroute'
+  | 'ollama'
+  | 'lmstudio'
+  | 'llamacpp'
+  | 'vllm'
+  | 'custom';
+
+export const PROVIDER_IDS: ReadonlyArray<Exclude<ProviderId, 'auto'>> = [
+  'ollama',
+  'lmstudio',
+  'omniroute',
+  'llamacpp',
+  'vllm',
+  'anthropic',
+  'openai',
+  'openrouter',
+  'custom',
+];
+
 export interface PermissionsConfig {
   mode: PermissionMode;
   allow: string[];
@@ -20,7 +44,23 @@ export interface WorkspaceConfig {
   allowOutside: boolean;
 }
 
+export interface SamplingConfig {
+  temperature: number;
+  topP: number;
+}
+
+export interface RequestConfig {
+  timeoutMs: number;
+}
+
+export interface UiConfig {
+  theme: string;
+  resources: boolean;
+  resourceIntervalMs: number;
+}
+
 export interface Config {
+  provider: ProviderId;
   model: string;
   maxTokens: number;
   maxTurns: number;
@@ -29,6 +69,9 @@ export interface Config {
   permissions: PermissionsConfig;
   context: ContextConfig;
   workspace: WorkspaceConfig;
+  sampling: SamplingConfig;
+  request: RequestConfig;
+  ui: UiConfig;
 }
 
 export const MODEL_ALIASES: Record<string, string> = {
@@ -40,10 +83,17 @@ export const MODEL_ALIASES: Record<string, string> = {
 
 export const PERMISSION_MODES: readonly PermissionMode[] = ['ask', 'auto', 'readonly'];
 
+/** Defaults used to detect "the user did not override this", so providers can fill it in. */
+export const DEFAULT_MODEL = 'claude-sonnet-5-5';
+export const DEFAULT_MAX_TOKENS = 8192;
+export const DEFAULT_CONTEXT_TOKENS = 200000;
+export const DEFAULT_THEME = 'nelo';
+
 export function defaultConfig(): Config {
   return {
-    model: 'claude-sonnet-5-5',
-    maxTokens: 8192,
+    provider: 'auto',
+    model: DEFAULT_MODEL,
+    maxTokens: DEFAULT_MAX_TOKENS,
     maxTurns: 40,
     permissions: {
       mode: 'ask',
@@ -51,11 +101,23 @@ export function defaultConfig(): Config {
       denyCommands: [],
     },
     context: {
-      maxTokens: 200000,
+      maxTokens: DEFAULT_CONTEXT_TOKENS,
       compactAt: 0.8,
     },
     workspace: {
       allowOutside: false,
+    },
+    sampling: {
+      temperature: 0.2,
+      topP: 0.9,
+    },
+    request: {
+      timeoutMs: 300000,
+    },
+    ui: {
+      theme: DEFAULT_THEME,
+      resources: true,
+      resourceIntervalMs: 1000,
     },
   };
 }
@@ -167,10 +229,22 @@ export function mergeConfig(base: Config, patch: Record<string, unknown>, source
     },
     context: { ...base.context },
     workspace: { ...base.workspace },
+    sampling: { ...base.sampling },
+    request: { ...base.request },
+    ui: { ...base.ui },
   };
 
   const label = (key: string): string => `${source}: "${key}"`;
 
+  if (patch.provider !== undefined) {
+    const value = requireString(patch.provider, label('provider')).trim().toLowerCase();
+    if (value !== 'auto' && !PROVIDER_IDS.includes(value as Exclude<ProviderId, 'auto'>)) {
+      throw new Error(
+        `${source}: "provider" must be one of: auto, ${PROVIDER_IDS.join(', ')}.`,
+      );
+    }
+    next.provider = value as ProviderId;
+  }
   if (patch.model !== undefined) {
     next.model = resolveModelAlias(requireString(patch.model, label('model')));
   }
@@ -218,6 +292,42 @@ export function mergeConfig(base: Config, patch: Record<string, unknown>, source
       next.workspace.allowOutside = requireBoolean(workspace.allowOutside, `${source}: "workspace.allowOutside"`);
     }
   }
+  if (patch.sampling !== undefined) {
+    const sampling = requireObject(patch.sampling, label('sampling'));
+    if (sampling.temperature !== undefined) {
+      next.sampling.temperature = requireNumberInRange(
+        sampling.temperature,
+        `${source}: "sampling.temperature"`,
+        0,
+        2,
+      );
+    }
+    if (sampling.topP !== undefined) {
+      next.sampling.topP = requireNumberInRange(sampling.topP, `${source}: "sampling.topP"`, 0, 1);
+    }
+  }
+  if (patch.request !== undefined) {
+    const request = requireObject(patch.request, label('request'));
+    if (request.timeoutMs !== undefined) {
+      next.request.timeoutMs = requireInteger(request.timeoutMs, `${source}: "request.timeoutMs"`, 1000);
+    }
+  }
+  if (patch.ui !== undefined) {
+    const ui = requireObject(patch.ui, label('ui'));
+    if (ui.theme !== undefined) {
+      next.ui.theme = requireString(ui.theme, `${source}: "ui.theme"`).trim() || DEFAULT_THEME;
+    }
+    if (ui.resources !== undefined) {
+      next.ui.resources = requireBoolean(ui.resources, `${source}: "ui.resources"`);
+    }
+    if (ui.resourceIntervalMs !== undefined) {
+      next.ui.resourceIntervalMs = requireInteger(
+        ui.resourceIntervalMs,
+        `${source}: "ui.resourceIntervalMs"`,
+        250,
+      );
+    }
+  }
 
   return next;
 }
@@ -257,6 +367,22 @@ function applyEnv(config: Config, env: NodeJS.ProcessEnv): string[] {
     config.permissions.mode = parsePermissionMode(env.NELO_PERMISSION_MODE);
     applied.push('NELO_PERMISSION_MODE');
   }
+  if (env.NELO_PROVIDER) {
+    const value = env.NELO_PROVIDER.trim().toLowerCase();
+    if (value !== 'auto' && !PROVIDER_IDS.includes(value as Exclude<ProviderId, 'auto'>)) {
+      throw new Error(`NELO_PROVIDER must be one of: auto, ${PROVIDER_IDS.join(', ')}.`);
+    }
+    config.provider = value as ProviderId;
+    applied.push('NELO_PROVIDER');
+  }
+  if (env.NELO_BASE_URL) {
+    config.baseURL = env.NELO_BASE_URL;
+    applied.push('NELO_BASE_URL');
+  }
+  if (env.NELO_THEME) {
+    config.ui.theme = env.NELO_THEME.trim() || DEFAULT_THEME;
+    applied.push('NELO_THEME');
+  }
 
   return applied;
 }
@@ -291,9 +417,17 @@ export interface CliOverrides {
   model?: string;
   maxTokens?: number;
   mode?: PermissionMode;
+  provider?: ProviderId;
+  baseURL?: string;
 }
 
 export function applyCliOverrides(config: Config, overrides: CliOverrides): void {
+  if (overrides.provider !== undefined) {
+    config.provider = overrides.provider;
+  }
+  if (overrides.baseURL !== undefined) {
+    config.baseURL = overrides.baseURL;
+  }
   if (overrides.model !== undefined) {
     config.model = resolveModelAlias(overrides.model);
   }

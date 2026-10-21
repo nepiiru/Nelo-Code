@@ -10,24 +10,49 @@ import {
   resolveApiKey,
   type LoadedConfig,
 } from './config.js';
+import {
+  applyProviderDefaults,
+  describeProvider,
+  listProviderPresets,
+  resolveProvider,
+  type ResolvedProvider,
+} from './providers.js';
 import { startRepl } from './repl.js';
 import { SessionStore, type SessionData } from './session.js';
 import { ansi, paint } from './ui/ansi.js';
 import { startTui } from './ui/tui/app.js';
 import { TuiUI } from './ui/tui/tui.js';
+import {
+  builtinThemeNames,
+  createThemeAddon,
+  loadThemeAddons,
+  resolveTheme,
+} from './ui/theme.js';
 import { TerminalUI } from './ui/ui.js';
 import { errorMessage } from './utils/text.js';
 import { readAllStdin } from './utils/stdin.js';
 import { getVersion } from './version.js';
 
-function printConfig(loaded: LoadedConfig): void {
+function printConfig(
+  loaded: LoadedConfig,
+  resolved: ResolvedProvider | null,
+  providerError: string | null,
+): void {
   const { config, sources } = loaded;
   const apiKey = resolveApiKey(config);
 
   const rows: Array<[string, string]> = [
+    [
+      'provider',
+      resolved
+        ? `${resolved.id}${resolved.detected ? ' (auto-detected)' : ''} · ${resolved.preset.label}`
+        : '(none available)',
+    ],
+    ['endpoint', resolved?.baseURL ?? '(SDK default)'],
     ['model', config.model],
     ['max output tokens', String(config.maxTokens)],
     ['max turns', String(config.maxTurns)],
+    ['sampling', `temperature ${config.sampling.temperature} · top_p ${config.sampling.topP}`],
     ['permission mode', config.permissions.mode],
     [
       'context window',
@@ -37,7 +62,17 @@ function printConfig(loaded: LoadedConfig): void {
       'workspace',
       config.workspace.allowOutside ? 'outside access allowed' : 'confined to the workspace',
     ],
-    ['api key', apiKey ? maskApiKey(apiKey) : '(not set)'],
+    ['theme', config.ui.theme],
+    ['resource monitor', config.ui.resources ? `on (${config.ui.resourceIntervalMs}ms)` : 'off'],
+    ['request timeout', `${Math.round(config.request.timeoutMs / 1000)}s`],
+    [
+      'api key',
+      apiKey
+        ? maskApiKey(apiKey)
+        : resolved?.preset.requiresKey === false
+          ? '(not required)'
+          : '(missing)',
+    ],
     ['global config', `${globalConfigPath()}${sources.global ? '' : ' (not found)'}`],
     ['project config', `${projectConfigPath(process.cwd())}${sources.project ? '' : ' (not found)'}`],
   ];
@@ -54,6 +89,63 @@ function printConfig(loaded: LoadedConfig): void {
   }
   if (config.permissions.denyCommands.length > 0) {
     console.log(`  ${'denied commands'.padEnd(20)} ${config.permissions.denyCommands.join(', ')}`);
+  }
+  if (providerError !== null) {
+    console.log('');
+    console.log(paint(`! ${providerError}`, ansi.yellow));
+  }
+}
+
+function printProviders(): void {
+  console.log(paint('Provider templates', ansi.bold));
+  for (const preset of listProviderPresets()) {
+    console.log(`  ${preset.id.padEnd(12)} ${preset.label}`);
+    console.log(`  ${''.padEnd(12)} ${paint(describeProvider(preset), ansi.dim)}`);
+    console.log(`  ${''.padEnd(12)} ${paint(preset.note, ansi.dim)}`);
+  }
+  console.log('');
+  console.log(paint('Use --provider <id>, or set "provider" in ~/.nelo/config.json.', ansi.dim));
+}
+
+function printThemes(cwd: string): void {
+  const { themes, errors, directories } = loadThemeAddons(cwd);
+  console.log(paint('Built-in themes', ansi.bold));
+  for (const name of builtinThemeNames()) {
+    console.log(`  ${name}`);
+  }
+  console.log('');
+  console.log(paint('Addon themes', ansi.bold));
+  if (themes.length === 0) {
+    console.log(paint('  (none) — scaffold one with: nelo addon new my-theme', ansi.dim));
+  }
+  for (const theme of themes) {
+    console.log(`  ${theme.name.padEnd(16)} ${theme.label}${theme.version ? ` v${theme.version}` : ''}`);
+    console.log(`  ${''.padEnd(16)} ${paint(theme.description, ansi.dim)}`);
+  }
+  console.log('');
+  console.log(paint(`Addon directories: ${directories.join(', ')}`, ansi.dim));
+  for (const error of errors) {
+    console.log(paint(`! ${error}`, ansi.yellow));
+  }
+}
+
+function handleAddonCommand(commandArgs: string[], cwd: string): number {
+  const [subcommand, name] = commandArgs;
+  if (subcommand !== 'new' || !name) {
+    console.error('Usage: nelo addon new <name>');
+    return 1;
+  }
+  try {
+    const manifest = createThemeAddon(name, cwd);
+    console.log(paint(`✔ Created ${manifest}`, ansi.green));
+    console.log('');
+    console.log('Next steps:');
+    console.log('  1. Edit colors / glyphs in that file.');
+    console.log(`  2. Run "nelo" and type /theme ${name} (or /theme reload while editing).`);
+    return 0;
+  } catch (error) {
+    console.error(paint(`✖ ${errorMessage(error)}`, ansi.red));
+    return 1;
   }
 }
 
@@ -85,6 +177,8 @@ export async function main(): Promise<void> {
       model: args.model,
       maxTokens: args.maxTokens,
       mode: args.mode,
+      provider: args.provider,
+      baseURL: args.baseURL,
     });
   } catch (error) {
     console.error(paint(`✖ ${errorMessage(error)}`, ansi.red));
@@ -92,23 +186,49 @@ export async function main(): Promise<void> {
     return;
   }
 
-  if (args.command === 'config') {
-    printConfig(loaded);
+  if (args.command === 'providers') {
+    printProviders();
+    return;
+  }
+  if (args.command === 'themes') {
+    printThemes(cwd);
+    return;
+  }
+  if (args.command === 'addon') {
+    process.exitCode = handleAddonCommand(args.commandArgs, cwd);
     return;
   }
 
-  if (!resolveApiKey(loaded.config)) {
-    console.error(paint('✖ Missing API key.', ansi.red));
+  if (args.command === 'config') {
+    // `nelo config` is also a diagnostic: show the resolved settings even when
+    // no provider is reachable, so the hint explains what is missing.
+    let configProvider: ResolvedProvider | null = null;
+    let configError: string | null = null;
+    try {
+      configProvider = await resolveProvider({ config: loaded.config });
+      applyProviderDefaults(loaded.config, configProvider);
+    } catch (error) {
+      configError = errorMessage(error);
+    }
+    printConfig(loaded, configProvider, configError);
+    return;
+  }
+
+  let resolved: ResolvedProvider;
+  try {
+    resolved = await resolveProvider({ config: loaded.config });
+    applyProviderDefaults(loaded.config, resolved);
+  } catch (error) {
+    console.error(paint(`✖ ${errorMessage(error)}`, ansi.red));
     console.error('');
-    console.error('Set ANTHROPIC_API_KEY in your environment:');
-    console.error('  export ANTHROPIC_API_KEY="sk-ant-..."   (macOS / Linux / Git Bash)');
-    console.error('  $env:ANTHROPIC_API_KEY = "sk-ant-..."   (PowerShell)');
-    console.error('');
-    console.error(
-      `Or add "apiKey" to ${globalConfigPath()} (not recommended on shared machines).`,
-    );
+    console.error('Run "nelo providers" to see the available templates.');
     process.exitCode = 1;
     return;
+  }
+
+  const theme = resolveTheme(loaded.config.ui.theme, cwd);
+  for (const warning of theme.errors) {
+    console.error(paint(`! ${warning}`, ansi.yellow));
   }
 
   const store = new SessionStore(cwd);
@@ -166,6 +286,7 @@ export async function main(): Promise<void> {
         cwd,
         prompt,
         session,
+        provider: resolved,
         signal: controller.signal,
       });
     } finally {
@@ -177,12 +298,13 @@ export async function main(): Promise<void> {
   if (useTui) {
     const tui = new TuiUI();
     try {
-      const runtime = createRuntime({
+      const runtime = await createRuntime({
         config: loaded.config,
         loaded,
         cwd,
         ui: tui,
         session,
+        provider: resolved,
       });
       await startTui(runtime, tui, { notice });
     } catch (error) {
@@ -207,12 +329,13 @@ export async function main(): Promise<void> {
   });
 
   try {
-    const runtime = createRuntime({
+    const runtime = await createRuntime({
       config: loaded.config,
       loaded,
       cwd,
       ui,
       session,
+      provider: resolved,
     });
     await startRepl(runtime, rl);
   } catch (error) {

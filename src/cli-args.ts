@@ -1,4 +1,6 @@
-import type { PermissionMode } from './config.js';
+import { PROVIDER_IDS, type PermissionMode, type ProviderId } from './config.js';
+
+export type CommandName = 'config' | 'providers' | 'themes' | 'addon';
 
 export interface CliArgs {
   prompt?: string;
@@ -8,13 +10,17 @@ export interface CliArgs {
   model?: string;
   maxTokens?: number;
   mode?: PermissionMode;
+  provider?: ProviderId;
+  baseURL?: string;
   noTui: boolean;
   help: boolean;
   version: boolean;
-  command?: 'config';
+  command?: CommandName;
+  commandArgs: string[];
 }
 
 const PERMISSION_MODES: readonly PermissionMode[] = ['ask', 'auto', 'readonly'];
+const COMMANDS: readonly CommandName[] = ['config', 'providers', 'themes', 'addon'];
 
 export function parseArgs(argv: string[]): CliArgs {
   const args: CliArgs = {
@@ -23,6 +29,7 @@ export function parseArgs(argv: string[]): CliArgs {
     noTui: false,
     help: false,
     version: false,
+    commandArgs: [],
   };
   const positionals: string[] = [];
 
@@ -57,6 +64,14 @@ export function parseArgs(argv: string[]): CliArgs {
       args.resumeId = valueOf('--resume');
     } else if (arg === '-m' || arg === '--model' || arg.startsWith('--model=')) {
       args.model = valueOf('--model');
+    } else if (arg === '--provider' || arg.startsWith('--provider=')) {
+      const raw = valueOf('--provider').trim().toLowerCase();
+      if (raw !== 'auto' && !PROVIDER_IDS.includes(raw as Exclude<ProviderId, 'auto'>)) {
+        throw new Error(`--provider must be one of: auto, ${PROVIDER_IDS.join(', ')}.`);
+      }
+      args.provider = raw as ProviderId;
+    } else if (arg === '--base-url' || arg.startsWith('--base-url=')) {
+      args.baseURL = valueOf('--base-url').trim();
     } else if (arg === '--max-tokens' || arg.startsWith('--max-tokens=')) {
       const raw = valueOf('--max-tokens');
       const parsed = Number(raw);
@@ -82,11 +97,15 @@ export function parseArgs(argv: string[]): CliArgs {
     index += 1;
   }
 
-  if (positionals[0] === 'config') {
-    args.command = 'config';
+  const first = positionals[0];
+  if (first !== undefined && (COMMANDS as readonly string[]).includes(first)) {
+    args.command = first as CommandName;
     positionals.shift();
   }
-  if (positionals.length > 0) {
+
+  if (args.command) {
+    args.commandArgs = positionals;
+  } else if (positionals.length > 0) {
     args.prompt = positionals.join(' ');
   }
 
@@ -102,9 +121,15 @@ Usage:
   nelo -p "prompt"          Same, explicit print mode
   nelo -p < prompt.txt      Read the prompt from stdin
   nelo config               Show the effective configuration
+  nelo providers            List provider templates (Ollama, LM Studio, …)
+  nelo themes               List built-in and addon themes
+  nelo addon new <name>     Scaffold a theme addon
 
 Options:
   -m, --model <name>        Model ID or alias (opus, sonnet, haiku, fable)
+      --provider <id>       auto | ollama | lmstudio | omniroute | llamacpp | vllm |
+                            anthropic | openai | openrouter | custom
+      --base-url <url>      Override the provider endpoint
   -y, --yes                 Auto-approve all tool calls (dangerous)
       --readonly            Only allow read-only tools
       --mode <mode>         ask | auto | readonly
@@ -117,13 +142,19 @@ Options:
   -V, --version             Show the version
 
 Environment:
-  ANTHROPIC_API_KEY         API key (required)
-  ANTHROPIC_BASE_URL        Custom API base URL
+  NELO_PROVIDER             auto | ollama | lmstudio | omniroute | … (default: auto)
+  NELO_BASE_URL             Override the provider endpoint
   NELO_MODEL                Default model
   NELO_PERMISSION_MODE      ask | auto | readonly
   NELO_MAX_TOKENS           Max output tokens
+  NELO_THEME                UI theme name
+  ANTHROPIC_API_KEY         Key for the anthropic provider
+  OPENAI_API_KEY            Key for the openai provider
+  OPENROUTER_API_KEY        Key for the openrouter provider
+  OMNIROUTE_API_KEY         Optional key for a secured OmniRoute instance
 
 Configuration files:
   ~/.nelo/config.json       Global settings
-  ./.nelo/config.json       Project settings (overrides global)`);
+  ./.nelo/config.json       Project settings (overrides global)
+  ~/.nelo/addons/<name>/    Theme addons`);
 }

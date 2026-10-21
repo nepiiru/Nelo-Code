@@ -1,0 +1,47 @@
+{
+  "name": "ocean",
+  "type": "theme",
+  "apiVersion": 1,
+  "version": "1.0.0",
+  "author": "you",
+  "label": "Ocean",
+  "description": "Deep blues with a soft cyan accent.",
+  "extends": "nelo",
+  "colors": {
+    "brand": "#4aa8ff",
+    "accent": "#4aa8ff",
+    "accentAlt": "#7ee7ff",
+    "user": "#9ad0ff",
+    "tool": "#5ce1b9",
+    "code": "#a5d6ff",
+    "heading": "#c3e8ff",
+    "border": "#1f3a4d",
+    "muted": "#6b8ba3",
+    "dim": "#4f6b80",
+    "vitals": "#6b8ba3"
+  },
+  "glyphs": {
+    "brand": "◈",
+    "prompt": "›",
+    "user": "›",
+    "tool": "▸",
+    "toolBranch": "└",
+    "separator": "─",
+    "bullet": "•"
+  },
+  "layout": {
+    "header": true,
+    "separators": true,
+    "statusBar": "plain",
+    "hints": true
+  },
+  "markdown": {
+    "heading": "heading",
+    "code": "code",
+    "fence": "dim",
+    "bullet": "accentAlt",
+    "strong": "brightWhite",
+    "emphasis": "muted",
+    "link": "dim"
+  }
+}

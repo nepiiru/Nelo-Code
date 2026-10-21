@@ -4,7 +4,16 @@ import type { UsageTotals } from '../../types.js';
 import { emptyUsage } from '../../types.js';
 import { formatTokenCount } from '../../utils/text.js';
 import { getVersion } from '../../version.js';
-import { ansi, paint } from '../ansi.js';
+import {
+  bold,
+  dim,
+  getActiveTheme,
+  glyph,
+  inverse,
+  paintToken,
+  setActiveTheme,
+  type Theme,
+} from '../theme.js';
 import type { UI } from '../ui.js';
 import { LineEditor } from './input.js';
 import { formatMarkdown } from './markdown.js';
@@ -12,14 +21,18 @@ import { Screen } from './screen.js';
 import { charWidth, padToWidth, stripAnsi, stringWidth, truncateAnsi } from './width.js';
 import { wrapText } from './wrap.js';
 
-const SPINNER_FRAMES = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
-
 const SLASH_COMMANDS = [
   '/help',
   '/clear',
   '/compact',
   '/model',
+  '/provider',
+  '/providers',
   '/permissions',
+  '/theme',
+  '/themes',
+  '/addons',
+  '/resources',
   '/usage',
   '/status',
   '/tools',
@@ -119,6 +132,7 @@ export class TuiUI implements UI {
   private scrollOffset = 0;
   private lastTotalLines: number | null = null;
   private lastWidth = 0;
+  private vitals: string[] = [];
 
   private lineResolver: ((line: string | null) => void) | null = null;
   private readonly queuedLines: string[] = [];
@@ -170,11 +184,14 @@ export class TuiUI implements UI {
     (this.screen.stream as ResizableStream).on('resize', this.onResize);
     process.on('exit', this.onProcessExit);
 
-    this.pushInfo(
-      `Nelo Code v${getVersion()} — AI coding agent. Type /help for commands.`,
-      'plain',
-    );
-    this.pushInfo('PgUp/PgDn scroll · Ctrl+C interrupts · Ctrl+D exits', 'plain');
+    const theme = getActiveTheme();
+    if (theme.layout.hints) {
+      this.pushInfo(
+        `Nelo Code v${getVersion()} — AI coding agent. Type /help for commands.`,
+        'plain',
+      );
+      this.pushInfo('PgUp/PgDn scroll · Ctrl+C interrupts · Ctrl+D exits', 'plain');
+    }
     this.requestRender();
   }
 
@@ -231,6 +248,29 @@ export class TuiUI implements UI {
   updateStatus(partial: Partial<TuiStatus>): void {
     this.status = { ...this.status, ...partial };
     this.requestRender();
+  }
+
+  /** Segments shown in the status bar (CPU / RAM / GPU / VRAM). */
+  setVitals(segments: string[]): void {
+    const changed =
+      segments.length !== this.vitals.length ||
+      segments.some((segment, index) => segment !== this.vitals[index]);
+    if (!changed) return;
+    this.vitals = segments;
+    this.requestRender();
+  }
+
+  /** Applies a theme at runtime and repaints the transcript with it. */
+  setTheme(theme: Theme): void {
+    setActiveTheme(theme);
+    for (const entry of this.entries) entry.cache = undefined;
+    this.lastTotalLines = null;
+    this.requestRender();
+  }
+
+  /** Re-reads the active theme (already applied) and repaints. */
+  refreshTheme(): void {
+    this.setTheme(getActiveTheme());
   }
 
   addUserMessage(text: string): void {
@@ -643,12 +683,25 @@ export class TuiUI implements UI {
     }
   }
 
+  /** Rows used by the header, rules, input line and status bar. */
+  private chromeRows(): number {
+    const theme = getActiveTheme();
+    let rows = 2; // input + status
+    if (theme.layout.header) rows += 1;
+    if (theme.layout.separators) rows += 2;
+    return rows;
+  }
+
+  private transcriptHeight(): number {
+    return Math.max(1, this.screen.rows - this.chromeRows());
+  }
+
   private pageSize(): number {
-    return Math.max(1, this.screen.rows - 6);
+    return Math.max(1, this.transcriptHeight() - 1);
   }
 
   private scrollBy(lines: number): void {
-    const height = Math.max(1, this.screen.rows - 5);
+    const height = this.transcriptHeight();
     const total = this.lastTotalLines ?? 0;
     const maxOffset = Math.max(0, total - height);
     this.scrollOffset = Math.min(maxOffset, Math.max(0, this.scrollOffset + lines));
@@ -656,7 +709,7 @@ export class TuiUI implements UI {
   }
 
   private scrollToTop(): void {
-    const height = Math.max(1, this.screen.rows - 5);
+    const height = this.transcriptHeight();
     const total = this.lastTotalLines ?? 0;
     this.scrollOffset = Math.max(0, total - height);
     this.requestRender();
@@ -678,15 +731,16 @@ export class TuiUI implements UI {
   private render(): void {
     if (!this.started) return;
 
+    const theme = getActiveTheme();
     const width = this.screen.columns;
     const height = this.screen.rows;
 
     if (width < 40 || height < 12) {
-      this.screen.render([paint('Terminal too small — resize to continue.', ansi.yellow)]);
+      this.screen.render([paintToken('warning', 'Terminal too small — resize to continue.')]);
       return;
     }
 
-    const transcriptHeight = height - 5;
+    const transcriptHeight = this.transcriptHeight();
     const all = this.buildTranscriptLines(width);
 
     if (this.lastWidth !== width) {
@@ -709,15 +763,15 @@ export class TuiUI implements UI {
 
     if (this.modal) visible = this.overlayModal(visible, width);
 
-    const separator = paint('─'.repeat(width), ansi.dim);
-    const lines = [
-      this.renderHeader(width),
-      separator,
-      ...visible,
-      separator,
-      this.renderInput(width),
-      this.renderStatus(width),
-    ];
+    const separator = paintToken('border', glyph('separator').repeat(width));
+    const lines: string[] = [];
+
+    if (theme.layout.header) lines.push(this.renderHeader(width));
+    if (theme.layout.separators) lines.push(separator);
+    lines.push(...visible);
+    if (theme.layout.separators) lines.push(separator);
+    lines.push(this.renderInput(width));
+    lines.push(this.renderStatus(width));
 
     this.screen.render(lines.map((line) => truncateAnsi(line, width)));
   }
@@ -746,7 +800,7 @@ export class TuiUI implements UI {
       case 'user': {
         const wrapped = wrapText(stripAnsi(entry.text), Math.max(1, width - 2));
         lines = wrapped.map((line, index) =>
-          index === 0 ? `${paint('❯', ansi.magenta)} ${line}` : `  ${line}`,
+          index === 0 ? `${paintToken('user', glyph('user'))} ${line}` : `  ${line}`,
         );
         break;
       }
@@ -757,16 +811,17 @@ export class TuiUI implements UI {
       }
 
       case 'tool': {
+        const frames = getActiveTheme().spinner;
         const icon =
           entry.status === 'running'
-            ? paint(SPINNER_FRAMES[this.spinnerFrame % SPINNER_FRAMES.length] ?? '⠋', ansi.yellow)
-            : paint('●', entry.status === 'error' ? ansi.red : ansi.green);
-        const summary = entry.summary ? paint(`(${stripAnsi(entry.summary)})`, ansi.dim) : '';
-        lines = [truncateAnsi(`${icon} ${paint(stripAnsi(entry.name), ansi.bold)}${summary}`, width)];
+            ? paintToken('warning', frames[this.spinnerFrame % frames.length] ?? frames[0] ?? '*')
+            : paintToken(entry.status === 'error' ? 'toolError' : 'tool', glyph('tool'));
+        const summary = entry.summary ? paintToken('dim', `(${stripAnsi(entry.summary)})`) : '';
+        lines = [truncateAnsi(`${icon} ${bold(stripAnsi(entry.name))}${summary}`, width)];
         if (entry.status !== 'running' && entry.detail) {
           const detail = stripAnsi(entry.detail);
-          const painted = entry.status === 'error' ? paint(detail, ansi.red) : paint(detail, ansi.dim);
-          lines.push(truncateAnsi(`  ${paint('└', ansi.dim)} ${painted}`, width));
+          const painted = entry.status === 'error' ? paintToken('danger', detail) : dim(detail);
+          lines.push(truncateAnsi(`  ${paintToken('dim', glyph('toolBranch'))} ${painted}`, width));
         }
         break;
       }
@@ -775,10 +830,17 @@ export class TuiUI implements UI {
         if (entry.level === 'plain') {
           lines = wrapText(stripAnsi(entry.text), width);
         } else {
-          const prefix = entry.level === 'warn' ? '! ' : entry.level === 'error' ? '✖ ' : '';
-          const color = entry.level === 'warn' ? ansi.yellow : entry.level === 'error' ? ansi.red : ansi.dim;
+          const prefix =
+            entry.level === 'warn'
+              ? `${glyph('warn')} `
+              : entry.level === 'error'
+                ? `${glyph('error')} `
+                : '';
+          const token = entry.level === 'warn' ? 'warning' : entry.level === 'error' ? 'danger' : 'dim';
           const wrapped = wrapText(stripAnsi(entry.text), Math.max(1, width - 2));
-          lines = wrapped.map((line, index) => paint(index === 0 ? `${prefix}${line}` : `  ${line}`, color));
+          lines = wrapped.map((line, index) =>
+            paintToken(token, index === 0 ? `${prefix}${line}` : `  ${line}`),
+          );
         }
         break;
       }
@@ -790,12 +852,9 @@ export class TuiUI implements UI {
   }
 
   private renderHeader(width: number): string {
-    const left = `${paint('◆', ansi.magenta)} ${paint('Nelo Code', ansi.bold)} ${paint(
-      `v${getVersion()}`,
-      ansi.dim,
-    )}`;
+    const left = `${paintToken('brand', glyph('brand'))} ${bold('Nelo Code')} ${dim(`v${getVersion()}`)}`;
     const rightText = [this.status.model, this.status.mode, this.status.cwdLabel].filter(Boolean).join(' · ');
-    const right = rightText ? paint(rightText, ansi.dim) : '';
+    const right = rightText ? dim(rightText) : '';
     const leftWidth = stringWidth(left);
     const rightWidth = stringWidth(right);
 
@@ -806,18 +865,18 @@ export class TuiUI implements UI {
   }
 
   private renderInput(width: number): string {
-    const prompt = paint('❯ ', ansi.green);
+    const prompt = `${paintToken('accent', glyph('prompt'))} `;
 
     if (this.modal) {
       return truncateAnsi(
-        `${prompt}${paint('Respond to the permission prompt (y / n / a)', ansi.dim)}`,
+        `${prompt}${dim('Respond to the permission prompt (y / n / a)')}`,
         width,
       );
     }
 
     if (this.editor.text.length === 0) {
       const hint = this.running ? 'Type to queue the next message…' : 'Ask Nelo Code to do something…';
-      return truncateAnsi(`${prompt}${paint(hint, ansi.dim)}`, width);
+      return truncateAnsi(`${prompt}${dim(hint)}`, width);
     }
 
     const available = Math.max(1, width - 2);
@@ -847,39 +906,52 @@ export class TuiUI implements UI {
       const codePoint = text.codePointAt(index) ?? 0;
       const character = String.fromCodePoint(codePoint);
       if (index === cursor) {
-        output += `${ansi.inverse}${character}${ansi.reset}`;
+        output += inverse(character);
         cursorRendered = true;
       } else {
         output += character;
       }
       index += character.length;
     }
-    if (!cursorRendered) output += `${ansi.inverse} ${ansi.reset}`;
+    if (!cursorRendered) output += inverse(glyph('cursor'));
 
     return truncateAnsi(`${prompt}${output}`, width);
   }
 
   private renderStatus(width: number): string {
-    const spinner = this.busy ? `${SPINNER_FRAMES[this.spinnerFrame % SPINNER_FRAMES.length] ?? '⠋'} ` : '';
+    const theme = getActiveTheme();
+    const frames = theme.spinner;
+    const spinner = this.busy ? `${frames[this.spinnerFrame % frames.length] ?? frames[0] ?? '*'} ` : '';
     const left = `${spinner}${this.stateLabel}`;
-    const usage = this.status.usage;
-    const rightParts: string[] = [];
-    if (this.scrollOffset > 0) rightParts.push(`↑${this.scrollOffset}`);
-    rightParts.push(
-      `${formatTokenCount(usage.inputTokens)} in / ${formatTokenCount(usage.outputTokens)} out`,
+
+    const candidates: string[] = [];
+    if (this.scrollOffset > 0) candidates.push(`${glyph('scroll')}${this.scrollOffset}`);
+    candidates.push(...this.vitals);
+    candidates.push(
+      `${formatTokenCount(this.status.usage.inputTokens)} in / ${formatTokenCount(
+        this.status.usage.outputTokens,
+      )} out`,
     );
-    const right = rightParts.join(' · ');
 
     const leftWidth = stringWidth(left);
-    const rightWidth = stringWidth(right);
+    const parts = [...candidates];
+    const build = (): string => parts.join(' · ');
+    while (parts.length > 0 && leftWidth + stringWidth(build()) + 2 > width) {
+      parts.pop();
+    }
+
+    const right = build();
     let content: string;
-    if (leftWidth + rightWidth + 2 <= width) {
-      content = `${left}${' '.repeat(width - leftWidth - rightWidth)}${right}`;
+    if (right && leftWidth + stringWidth(right) + 2 <= width) {
+      content = `${left}${' '.repeat(width - leftWidth - stringWidth(right))}${right}`;
     } else {
       content = truncateAnsi(left, width);
     }
 
-    return paint(padToWidth(content, width), ansi.inverse);
+    const padded = padToWidth(content, width);
+    if (theme.layout.statusBar === 'inverse') return inverse(padded);
+    if (theme.layout.statusBar === 'accent') return paintToken('accent', padded);
+    return padded;
   }
 
   private overlayModal(visible: string[], width: number): string[] {
@@ -901,7 +973,7 @@ export class TuiUI implements UI {
       row('Allow this tool call?'),
       row('[y] Yes   [n] No   [a] Always (session)'),
       bottom,
-    ].map((line) => paint(truncateAnsi(line, boxWidth), ansi.yellow));
+    ].map((line) => paintToken('warning', truncateAnsi(line, boxWidth)));
 
     const leftPad = Math.max(0, Math.floor((width - boxWidth) / 2));
     const prefix = ' '.repeat(leftPad);
