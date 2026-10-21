@@ -93,6 +93,12 @@ describe('resolveProvider', () => {
     expect(resolved.baseURL).toBe('http://127.0.0.1:9999/v1');
   });
 
+  it('leaves the model empty when the preset has no default', async () => {
+    const config = configWith({ provider: 'lmstudio' });
+    const resolved = await resolveProvider({ config, env: {} });
+    expect(resolved.model).toBe('');
+  });
+
   it('requires a key for cloud providers', async () => {
     const config = configWith({ provider: 'anthropic' });
     await expect(resolveProvider({ config, env: {} })).rejects.toThrow(/requires an API key/);

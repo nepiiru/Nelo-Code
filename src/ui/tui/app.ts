@@ -1,5 +1,5 @@
 import { basename } from 'node:path';
-import type { Runtime } from '../../app.js';
+import { connectionHint, connectionProblem, type Runtime } from '../../app.js';
 import { describeApiError } from '../../client.js';
 import { handleSlashCommand, printTurnStats, runShellEscape } from '../../commands.js';
 import { vitalsSegments } from '../../system/resources.js';
@@ -13,12 +13,20 @@ export async function startTui(
   tui.start();
   if (options.notice) tui.warn(options.notice);
 
+  const problem = connectionProblem(runtime);
+  if (problem) {
+    tui.warn(problem);
+    tui.info(connectionHint(runtime));
+  }
+
   let controller: AbortController | null = null;
   let abortRequested = false;
 
   const updateStatus = (): void => {
     tui.updateStatus({
-      model: runtime.config.model,
+      model: runtime.provider
+        ? runtime.config.model || 'no model'
+        : 'not connected',
       mode: runtime.config.permissions.mode,
       sessionId: runtime.session.id,
       usage: runtime.agent.usage,
@@ -79,6 +87,15 @@ export async function startTui(
       if (input.startsWith('!')) {
         await runShellEscape(runtime, input.slice(1).trim());
         tui.setIdle();
+        continue;
+      }
+
+      const missing = connectionProblem(runtime);
+      if (missing) {
+        tui.warn(missing);
+        tui.info(connectionHint(runtime));
+        tui.setIdle();
+        updateStatus();
         continue;
       }
 

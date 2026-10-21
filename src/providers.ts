@@ -302,9 +302,9 @@ export async function resolveProvider(
     );
   }
 
-  const model = config.model === DEFAULT_MODEL && preset.defaultModel
-    ? preset.defaultModel
-    : config.model;
+  // When the user has not chosen a model, use the provider's default. Providers
+  // without one keep the model empty so it can be discovered from the server.
+  const model = config.model === DEFAULT_MODEL ? preset.defaultModel : config.model;
 
   const contextWindow = config.context.maxTokens === DEFAULT_CONTEXT_TOKENS
     ? preset.contextWindow

@@ -1,5 +1,5 @@
 import type { TurnResult } from './agent.js';
-import { resetSession, resumeSession, type Runtime } from './app.js';
+import { connectionHint, connectionProblem, resetSession, resumeSession, type Runtime } from './app.js';
 import {
   MODEL_ALIASES,
   parsePermissionMode,
@@ -32,14 +32,14 @@ export function printTurnStats(runtime: Runtime, result: TurnResult): void {
 }
 
 function describeEndpoint(runtime: Runtime): string {
-  return runtime.provider.baseURL ?? '(SDK default)';
+  return runtime.provider?.baseURL ?? '(not connected)';
 }
 
 async function switchProvider(runtime: Runtime, argument: string): Promise<void> {
   const id = argument.trim().toLowerCase();
-  if (!isProviderId(id) || id === 'auto') {
+  if (!isProviderId(id)) {
     runtime.ui.warn(
-      `Unknown provider "${argument}". Use one of: ${listProviderPresets()
+      `Unknown provider "${argument}". Use one of: auto, ${listProviderPresets()
         .map((preset) => preset.id)
         .join(', ')}.`,
     );
@@ -47,7 +47,7 @@ async function switchProvider(runtime: Runtime, argument: string): Promise<void>
   }
 
   try {
-    const resolved = await runtime.switchProvider(id as Exclude<ProviderId, 'auto'>);
+    const resolved = await runtime.switchProvider(id as ProviderId);
     runtime.ui.info(
       `Provider set to ${resolved.id} · ${resolved.model} · ${resolved.baseURL ?? 'SDK default'}`,
     );
@@ -148,14 +148,21 @@ export async function handleSlashCommand(runtime: Runtime, input: string): Promi
       ui.info('Started a new conversation. Context cleared.');
       return true;
 
-    case 'compact':
+    case 'compact': {
+      const problem = connectionProblem(runtime);
+      if (problem) {
+        ui.warn(problem);
+        ui.info(connectionHint(runtime));
+        return true;
+      }
       await runtime.agent.compact();
       await runtime.saveSession();
       return true;
+    }
 
     case 'model': {
       if (!argument) {
-        ui.info(`Current model: ${config.model}`);
+        ui.info(`Current model: ${runtime.provider ? config.model || '(none)' : '(none)'}`);
         ui.info(
           `Aliases: ${Object.entries(MODEL_ALIASES)
             .map(([alias, id]) => `${alias} → ${id}`)
@@ -171,14 +178,20 @@ export async function handleSlashCommand(runtime: Runtime, input: string): Promi
 
     case 'provider': {
       if (!argument) {
-        ui.info(
-          `Provider: ${runtime.provider.id} · ${config.model} · ${describeEndpoint(runtime)}`,
-        );
+        if (runtime.provider) {
+          ui.info(
+            `Provider: ${runtime.provider.id} · ${config.model} · ${describeEndpoint(runtime)}`,
+          );
+        } else {
+          ui.warn(connectionProblem(runtime) ?? 'No provider is connected.');
+          ui.info(connectionHint(runtime));
+        }
         ui.raw(
           listProviderPresets()
             .map((preset) => `  ${preset.id.padEnd(12)} ${describeProvider(preset)}`)
             .join('\n'),
         );
+        ui.info('Switch with /provider <id>, or re-run auto-detection with /provider auto.');
         return true;
       }
       await switchProvider(runtime, argument);
@@ -261,9 +274,9 @@ export async function handleSlashCommand(runtime: Runtime, input: string): Promi
     case 'status': {
       ui.info(`Session: ${runtime.session.id}`);
       ui.info(
-        `Provider: ${runtime.provider.id} · Model: ${config.model} · Mode: ${
-          config.permissions.mode
-        } · Messages: ${runtime.agent.messages.length}`,
+        `Provider: ${runtime.provider?.id ?? 'not connected'} · Model: ${
+          runtime.provider ? config.model || '(none)' : '(none)'
+        } · Mode: ${config.permissions.mode} · Messages: ${runtime.agent.messages.length}`,
       );
       ui.info(
         `Estimated context: ~${formatTokenCount(runtime.agent.estimatedContextTokens())} / ${formatTokenCount(
@@ -335,7 +348,7 @@ export function printHelp(runtime: Runtime): void {
       '  /clear              Start a new conversation',
       '  /compact            Summarize older messages to free context',
       '  /model [name]       Show or change the model',
-      '  /provider [id]      Show or switch the provider (ollama, lmstudio, …)',
+      '  /provider [id]      Show or switch the provider (ollama, lmstudio, …), or "auto"',
       '  /providers          List provider templates',
       '  /permissions [mode] Show or set mode: ask | auto | readonly',
       '  /theme [name|reload] Show, switch or reload UI themes',

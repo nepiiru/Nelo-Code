@@ -49,7 +49,7 @@ function printConfig(
         : '(none available)',
     ],
     ['endpoint', resolved?.baseURL ?? '(SDK default)'],
-    ['model', config.model],
+    ['model', resolved ? resolved.model || '(auto-detect)' : config.model],
     ['max output tokens', String(config.maxTokens)],
     ['max turns', String(config.maxTurns)],
     ['sampling', `temperature ${config.sampling.temperature} · top_p ${config.sampling.topP}`],
@@ -214,16 +214,23 @@ export async function main(): Promise<void> {
     return;
   }
 
-  let resolved: ResolvedProvider;
+  const isPrintMode = args.print || args.prompt !== undefined;
+
+  let resolved: ResolvedProvider | null = null;
+  let providerError: string | null = null;
   try {
     resolved = await resolveProvider({ config: loaded.config });
     applyProviderDefaults(loaded.config, resolved);
   } catch (error) {
-    console.error(paint(`✖ ${errorMessage(error)}`, ansi.red));
-    console.error('');
-    console.error('Run "nelo providers" to see the available templates.');
-    process.exitCode = 1;
-    return;
+    providerError = errorMessage(error);
+    // Non-interactive runs cannot ask the user to connect later, so fail now.
+    if (isPrintMode) {
+      console.error(paint(`✖ ${providerError}`, ansi.red));
+      console.error('');
+      console.error('Run "nelo providers" to see the available templates.');
+      process.exitCode = 1;
+      return;
+    }
   }
 
   const theme = resolveTheme(loaded.config.ui.theme, cwd);
@@ -251,8 +258,6 @@ export async function main(): Promise<void> {
       else console.error(paint(`! ${message}`, ansi.yellow));
     }
   }
-
-  const isPrintMode = args.print || args.prompt !== undefined;
 
   if (isPrintMode) {
     let prompt = args.prompt;
@@ -287,6 +292,7 @@ export async function main(): Promise<void> {
         prompt,
         session,
         provider: resolved,
+        providerError,
         signal: controller.signal,
       });
     } finally {
@@ -305,6 +311,7 @@ export async function main(): Promise<void> {
         ui: tui,
         session,
         provider: resolved,
+        providerError,
       });
       await startTui(runtime, tui, { notice });
     } catch (error) {
@@ -336,6 +343,7 @@ export async function main(): Promise<void> {
       ui,
       session,
       provider: resolved,
+      providerError,
     });
     await startRepl(runtime, rl);
   } catch (error) {

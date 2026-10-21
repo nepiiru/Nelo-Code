@@ -55,6 +55,26 @@ function runCli(args, cwd, env) {
   });
 }
 
+function runCliWithInput(args, cwd, env, input) {
+  return new Promise((resolve) => {
+    const child = spawn(process.execPath, [join(root, 'bin', 'nelo.js'), ...args], {
+      cwd,
+      env,
+      stdio: ['pipe', 'pipe', 'pipe'],
+    });
+    let stdout = '';
+    let stderr = '';
+    child.stdout.on('data', (chunk) => {
+      stdout += chunk;
+    });
+    child.stderr.on('data', (chunk) => {
+      stderr += chunk;
+    });
+    child.on('close', (code) => resolve({ code, stdout, stderr }));
+    child.stdin.end(input);
+  });
+}
+
 async function cleanup() {
   if (mock && !mock.killed) mock.kill();
   if (localMock && !localMock.killed) localMock.kill();
@@ -170,7 +190,31 @@ try {
   assert(themesRun.code === 0, 'themes command failed');
   assert(themesRun.stdout.includes('midnight'), 'built-in themes are missing');
 
-  console.log('✔ E2E passed: tool loop, session persistence, write approval, read-only denial, local provider, text tool calls');
+  // 8. Interactive start succeeds without a usable provider and explains how to connect.
+  const noProviderRun = await runCliWithInput(
+    ['--no-tui', '--provider', 'anthropic'],
+    workspace,
+    localEnv,
+    '/status\n/exit\n',
+  );
+  assert(
+    noProviderRun.code === 0,
+    `no-provider run exited with ${noProviderRun.code}: ${noProviderRun.stderr}`,
+  );
+  assert(
+    noProviderRun.stdout.includes('not connected'),
+    'the disconnected banner/status is missing',
+  );
+  assert(
+    noProviderRun.stdout.includes('/provider'),
+    'the connect hint is missing',
+  );
+  assert(
+    noProviderRun.stdout.includes('requires an API key'),
+    'the provider configuration error is missing',
+  );
+
+  console.log('✔ E2E passed: tool loop, session persistence, write approval, read-only denial, local provider, text tool calls, disconnected startup');
 } catch (error) {
   console.error(`✖ E2E failed: ${error instanceof Error ? error.message : String(error)}`);
   process.exitCode = 1;

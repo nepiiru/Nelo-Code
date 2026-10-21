@@ -19,6 +19,7 @@ Nelo Code 自体を Nelo Code で開発するための指示ファイル。
 - ツールは `src/tools/` に1ファイル1ツールで実装し、`src/tools/index.ts` に登録する。
 - ツールは `ToolContext.workspaceRoot` の外へアクセスしない（`resolveWorkspacePath` を使う）。
 - モデル呼び出しは `ModelClient` インターフェース越しに行い、テストでは `FakeClient` に差し替える。
+- **プロバイダ未接続でも起動できる。** `createRuntime` は `provider: null` を許容し、`UnavailableClient` で埋める。送信前に `connectionProblem()` / `connectionHint()` で接続方法を案内し、起動時点で例外を投げない（`-p` の非対話モードだけは即エラー終了）。
 
 ### プロバイダ
 

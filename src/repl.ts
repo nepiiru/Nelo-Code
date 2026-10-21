@@ -1,12 +1,18 @@
 import type { Interface } from 'node:readline/promises';
 import { handleSlashCommand, printTurnStats, runShellEscape } from './commands.js';
-import type { Runtime } from './app.js';
+import { connectionHint, connectionProblem, type Runtime } from './app.js';
 import { describeApiError } from './client.js';
 import { ansi, paint } from './ui/ansi.js';
 import { getVersion } from './version.js';
 
 export async function startRepl(runtime: Runtime, rl: Interface): Promise<void> {
   printBanner(runtime);
+
+  const problem = connectionProblem(runtime);
+  if (problem) {
+    runtime.ui.warn(problem);
+    runtime.ui.info(connectionHint(runtime));
+  }
 
   let controller: AbortController | null = null;
   let abortRequested = false;
@@ -83,6 +89,13 @@ export async function startRepl(runtime: Runtime, rl: Interface): Promise<void> 
         continue;
       }
 
+      const missing = connectionProblem(runtime);
+      if (missing) {
+        runtime.ui.warn(missing);
+        runtime.ui.info(connectionHint(runtime));
+        continue;
+      }
+
       controller = new AbortController();
       abortRequested = false;
       running = true;
@@ -114,10 +127,11 @@ export async function startRepl(runtime: Runtime, rl: Interface): Promise<void> 
 
 function printBanner(runtime: Runtime): void {
   const { config, ui } = runtime;
+  const modelLabel = runtime.provider ? config.model || 'no model' : 'not connected';
   ui.raw('');
   ui.raw(`${paint('◆', ansi.magenta)} ${paint('Nelo Code', ansi.bold)} ${paint(`v${getVersion()}`, ansi.dim)}`);
   ui.raw(
-    `${paint('  model', ansi.dim)} ${config.model}  ${paint('·', ansi.dim)} ${paint('mode', ansi.dim)} ${
+    `${paint('  model', ansi.dim)} ${modelLabel}  ${paint('·', ansi.dim)} ${paint('mode', ansi.dim)} ${
       config.permissions.mode
     }  ${paint('·', ansi.dim)} ${paint('cwd', ansi.dim)} ${runtime.cwd}`,
   );

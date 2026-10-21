@@ -1,5 +1,10 @@
 import { Agent } from './agent.js';
-import { createModelClient, describeApiError, type ModelClient } from './client.js';
+import {
+  createModelClient,
+  describeApiError,
+  type ModelClient,
+  type ModelResponse,
+} from './client.js';
 import { OpenAIChatClient } from './client-openai.js';
 import type { Config, LoadedConfig, ProviderId } from './config.js';
 import { fetchLlamaCppContextLength, fetchOllamaContextLength, ollamaBaseURL } from './ollama.js';
@@ -7,7 +12,6 @@ import { PermissionManager } from './permissions.js';
 import { buildSystemPrompt } from './prompt.js';
 import {
   applyProviderDefaults,
-  getProviderPreset,
   resolveProvider,
   type ResolvedProvider,
 } from './providers.js';
@@ -17,13 +21,17 @@ import { createTools } from './tools/index.js';
 import type { Tool } from './types.js';
 import { resolveTheme, setActiveTheme } from './ui/theme.js';
 import { TerminalUI, type UI } from './ui/ui.js';
+import { errorMessage } from './utils/text.js';
 
 export interface Runtime {
   config: Config;
   loaded: LoadedConfig;
   cwd: string;
   ui: UI;
-  provider: ResolvedProvider;
+  /** Null until a provider is resolved; Nelo Code still starts in this state. */
+  provider: ResolvedProvider | null;
+  /** Why no provider/model is usable, or null when the runtime is ready. */
+  connectionIssue: string | null;
   client: ModelClient;
   tools: Tool[];
   permissions: PermissionManager;
@@ -32,8 +40,39 @@ export interface Runtime {
   session: SessionData;
   monitor: ResourceMonitor;
   saveSession(): Promise<void>;
-  /** Rebuilds the client for another provider, keeping the conversation. */
-  switchProvider(id: Exclude<ProviderId, 'auto'>, options?: { baseURL?: string }): Promise<ResolvedProvider>;
+  /** Rebuilds the client for another provider (or re-runs auto-detection). */
+  switchProvider(id: ProviderId, options?: { baseURL?: string }): Promise<ResolvedProvider>;
+}
+
+/** Model client used while no provider is connected. */
+class UnavailableClient implements ModelClient {
+  constructor(private readonly reason: string) {}
+
+  async stream(): Promise<ModelResponse> {
+    throw new Error(this.reason);
+  }
+}
+
+/** Returns a user-facing explanation when prompts cannot be sent yet. */
+export function connectionProblem(runtime: Runtime): string | null {
+  if (!runtime.provider) {
+    return runtime.connectionIssue ?? 'No model provider is connected.';
+  }
+  if (!runtime.config.model) {
+    return (
+      runtime.connectionIssue ??
+      `Provider "${runtime.provider.id}" is selected, but no model is loaded.`
+    );
+  }
+  return null;
+}
+
+/** Actionable next step shown next to a connection problem. */
+export function connectionHint(runtime: Runtime): string {
+  if (runtime.provider) {
+    return `Load or pull a model, then run /provider ${runtime.provider.id}, or set one with /model <name>.`;
+  }
+  return 'Run /provider <id> to connect (see /providers). For Ollama: start "ollama serve", then /provider ollama. Cloud keys require a restart after setting them.';
 }
 
 function applyTheme(config: Config, cwd: string, ui: UI): void {
@@ -79,31 +118,54 @@ export async function createRuntime(options: {
   cwd: string;
   ui: UI;
   session?: SessionData | null;
-  provider?: ResolvedProvider;
+  provider?: ResolvedProvider | null;
+  providerError?: string | null;
 }): Promise<Runtime> {
   const config = options.config;
-  const resolved = options.provider ?? (await resolveProvider({ config }));
-  applyProviderDefaults(config, resolved);
+  let resolved = options.provider ?? null;
+  let providerError = options.providerError ?? null;
+
+  // Starting without a provider is a supported state. Resolve when possible,
+  // but keep going so the UI can ask the user to connect when they need it.
+  if (resolved === null && providerError === null) {
+    try {
+      resolved = await resolveProvider({ config });
+    } catch (error) {
+      providerError = errorMessage(error);
+    }
+  }
+
+  let connectionIssue: string | null = null;
+  let client: ModelClient;
+  let ollamaURL: string | undefined;
+
+  if (resolved) {
+    applyProviderDefaults(config, resolved);
+    client = createModelClient(resolved, { timeoutMs: config.request.timeoutMs });
+
+    const model = await detectModel(client, resolved.model);
+    if (!model) {
+      config.model = '';
+      connectionIssue =
+        `Provider "${resolved.id}" is selected, but no model is loaded. ` +
+        `Load or pull one, then run /provider ${resolved.id}, or set one with /model <name>.`;
+    } else {
+      resolved.model = model;
+      config.model = model;
+
+      const detectedContext = await detectContextWindow(resolved);
+      if (detectedContext && config.context.maxTokens === resolved.preset.contextWindow) {
+        config.context.maxTokens = detectedContext;
+      }
+    }
+
+    ollamaURL = resolved.id === 'ollama' ? ollamaBaseURL(resolved.baseURL) : undefined;
+  } else {
+    connectionIssue = providerError ?? 'No model provider is connected.';
+    client = new UnavailableClient(connectionIssue);
+  }
+
   applyTheme(config, options.cwd, options.ui);
-
-  const client = createModelClient(resolved, { timeoutMs: config.request.timeoutMs });
-
-  const model = await detectModel(client, resolved.model);
-  if (!model) {
-    throw new Error(
-      `No model selected for provider "${resolved.id}". Pass -m <model> or pull one first ` +
-        '(for Ollama: "ollama pull qwen2.5-coder:7b").',
-    );
-  }
-  if (model !== resolved.model) {
-    resolved.model = model;
-    config.model = model;
-  }
-
-  const detectedContext = await detectContextWindow(resolved);
-  if (detectedContext && config.context.maxTokens === resolved.preset.contextWindow) {
-    config.context.maxTokens = detectedContext;
-  }
 
   const tools = createTools();
   const permissions = new PermissionManager(config, (request) => options.ui.confirm(request));
@@ -123,9 +185,7 @@ export async function createRuntime(options: {
   });
 
   const store = new SessionStore(options.cwd);
-  const monitor = new ResourceMonitor({
-    ollamaBaseURL: resolved.id === 'ollama' ? ollamaBaseURL(resolved.baseURL) : undefined,
-  });
+  const monitor = new ResourceMonitor({ ollamaBaseURL: ollamaURL });
 
   const runtime: Runtime = {
     config,
@@ -133,6 +193,7 @@ export async function createRuntime(options: {
     cwd: options.cwd,
     ui: options.ui,
     provider: resolved,
+    connectionIssue,
     client,
     tools,
     permissions,
@@ -147,11 +208,8 @@ export async function createRuntime(options: {
       await store.save(runtime.session);
     },
     async switchProvider(id, switchOptions = {}): Promise<ResolvedProvider> {
-      const preset = getProviderPreset(id);
-      const previous = runtime.provider.preset;
+      const previous = runtime.provider?.preset;
 
-      // Recompute the budgets that were inherited from the previous provider,
-      // but keep anything the user set explicitly.
       const next: Config = {
         ...config,
         provider: id,
@@ -162,30 +220,40 @@ export async function createRuntime(options: {
         request: config.request,
         ui: config.ui,
       };
-      if (next.context.maxTokens === previous.contextWindow) {
-        next.context.maxTokens = preset.contextWindow;
-      }
-      if (next.maxTokens === previous.maxOutputTokens) {
-        next.maxTokens = preset.maxOutputTokens;
-      }
-      if (preset.defaultModel) next.model = preset.defaultModel;
       if (switchOptions.baseURL) next.baseURL = switchOptions.baseURL;
       else delete next.baseURL;
       delete next.apiKey;
 
       const nextResolved = await resolveProvider({ config: next });
+      const preset = nextResolved.preset;
+
+      // Recompute the budgets that were inherited from the previous provider,
+      // but keep anything the user set explicitly.
+      if (previous) {
+        if (next.context.maxTokens === previous.contextWindow) {
+          next.context.maxTokens = preset.contextWindow;
+        }
+        if (next.maxTokens === previous.maxOutputTokens) {
+          next.maxTokens = preset.maxOutputTokens;
+        }
+      }
+      // Switching providers starts from that provider's default model; an empty
+      // default means "discover the first model the server reports".
+      next.model = preset.defaultModel;
       applyProviderDefaults(next, nextResolved);
+      nextResolved.model = next.model;
 
       const nextClient = createModelClient(nextResolved, { timeoutMs: next.request.timeoutMs });
-      const nextModel = await detectModel(nextClient, nextResolved.model);
+      const nextModel = await detectModel(nextClient, next.model);
       if (!nextModel) {
         throw new Error(
-          `Provider "${id}" reported no models. Pull or load a model first, then pass -m <model>.`,
+          `Provider "${nextResolved.id}" did not report any models. Start the server and load one, ` +
+            `then run /provider ${nextResolved.id} again, or set a model with /model <name>.`,
         );
       }
       nextResolved.model = nextModel;
 
-      config.provider = next.provider;
+      config.provider = id;
       config.model = nextModel;
       config.maxTokens = next.maxTokens;
       config.context.maxTokens = next.context.maxTokens;
@@ -196,6 +264,7 @@ export async function createRuntime(options: {
 
       runtime.provider = nextResolved;
       runtime.client = nextClient;
+      runtime.connectionIssue = null;
       agent.setClient(nextClient);
       runtime.monitor.setOllamaBaseURL(
         nextResolved.id === 'ollama' ? ollamaBaseURL(nextResolved.baseURL) : undefined,
@@ -227,7 +296,8 @@ export async function runPrintMode(options: {
   cwd: string;
   prompt: string;
   session?: SessionData | null;
-  provider?: ResolvedProvider;
+  provider?: ResolvedProvider | null;
+  providerError?: string | null;
   signal?: AbortSignal;
 }): Promise<number> {
   const ui = new TerminalUI({ interactive: false });
@@ -238,8 +308,15 @@ export async function runPrintMode(options: {
       cwd: options.cwd,
       ui,
       session: options.session ?? null,
-      ...(options.provider ? { provider: options.provider } : {}),
+      provider: options.provider ?? null,
+      providerError: options.providerError ?? null,
     });
+    const problem = connectionProblem(runtime);
+    if (problem) {
+      ui.error(problem);
+      ui.info(connectionHint(runtime));
+      return 1;
+    }
     const result = await runtime.agent.run(options.prompt, options.signal);
     await runtime.saveSession();
     return result.aborted ? 130 : 0;

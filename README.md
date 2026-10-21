@@ -56,6 +56,8 @@ nelo -p "テストを直して" -y   # 非対話 + ツール自動承認
 
 `nelo` は起動時に localhost のモデルサーバーを探します（Ollama → LM Studio → OmniRoute → llama.cpp → vLLM の順）。見つからなければ、API キーが設定されているクラウドプロバイダにフォールバックします。
 
+プロバイダが見つからなくても起動は成功します。`not connected` のまま TUI が開き、メッセージを送ろうとした時点で接続方法を案内します。後から `ollama serve` を起動した場合は `/provider ollama`（再検出は `/provider auto`）で、会話を保ったまま接続できます。
+
 ```bash
 nelo providers               # 利用できるテンプレート一覧
 nelo --provider lmstudio     # 明示指定
@@ -142,7 +144,7 @@ Ready              CPU 18% · RAM 12.4G/31.9G · GPU 64% 7.1G/8.0G   12.3k in / 
 | `/clear` | 会話をリセットして新しいセッションを開始 |
 | `/compact` | 古いメッセージを今すぐ要約 |
 | `/model [name]` | モデルの表示・変更（エイリアス: `opus` `sonnet` `haiku` `fable`） |
-| `/provider [id]` | プロバイダの表示・切り替え |
+| `/provider [id]` | プロバイダの表示・切り替え（`auto` で再検出） |
 | `/providers` | プロバイダテンプレート一覧 |
 | `/permissions [mode]` | 権限モードの表示・変更（`ask` / `auto` / `readonly`） |
 | `/theme [name\|reload]` | テーマの表示・切り替え・再読み込み |
