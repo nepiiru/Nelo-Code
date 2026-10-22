@@ -85,6 +85,46 @@ describe('LineEditor', () => {
     expect(editor.historyPrevious()).toBe(false);
   });
 
+  it('inserts newlines and navigates across them', () => {
+    const editor = new LineEditor();
+    editor.insert('first');
+    editor.insertNewline();
+    editor.insert('second');
+    expect(editor.text).toBe('first\nsecond');
+    expect(editor.cursor).toBe(12);
+    expect(editor.isMultiline).toBe(true);
+
+    editor.moveHome();
+    expect(editor.cursor).toBe(6);
+    editor.moveUp();
+    expect(editor.cursor).toBe(0);
+    editor.moveEnd();
+    expect(editor.cursor).toBe(5);
+    editor.moveDown();
+    expect(editor.cursor).toBe(11);
+  });
+
+  it('keeps ctrl-u, ctrl-k, and ctrl-w within the current line', () => {
+    const start = new LineEditor();
+    start.setText('one\ntwo');
+    start.moveHome();
+    start.moveRight();
+    start.deleteToStart();
+    expect(start.text).toBe('one\nwo');
+
+    const end = new LineEditor();
+    end.setText('one\ntwo');
+    end.moveHome();
+    end.moveRight();
+    end.deleteToEnd();
+    expect(end.text).toBe('one\nt');
+
+    const word = new LineEditor();
+    word.setText('one\ntwo');
+    word.deleteWordBefore();
+    expect(word.text).toBe('one\n');
+  });
+
   it('sanitizes newlines, tabs, ANSI, and control characters', () => {
     const editor = new LineEditor();
     editor.insert('a\nb\tc\x1b[31md\x07');

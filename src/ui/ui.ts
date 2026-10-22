@@ -3,6 +3,19 @@ import { colorEnabled } from './ansi.js';
 import { StreamRenderer } from './render.js';
 import { bold, dim, glyph, paintToken, spinnerFrames } from './theme.js';
 
+export interface SelectOption {
+  value: string;
+  label: string;
+  description?: string;
+}
+
+export interface SelectRequest {
+  title: string;
+  options: SelectOption[];
+  /** Value of the option highlighted when the window opens. */
+  selected?: string;
+}
+
 export interface UI {
   text(delta: string): void;
   endText(): void;
@@ -16,6 +29,8 @@ export interface UI {
   spinner(label: string): void;
   stopSpinner(): void;
   confirm(request: PermissionRequest): Promise<PermissionAnswer>;
+  /** Shows a selection window. Resolves to null when cancelled. */
+  select(request: SelectRequest): Promise<string | null>;
   hasPendingPrompt(): boolean;
   /** Records a submitted user message. Line-based UIs already echo the prompt. */
   addUserMessage(text: string): void;
@@ -145,6 +160,41 @@ export class TerminalUI implements UI {
       if (answer === 'y' || answer === 'yes') return 'yes';
       if (answer === 'a' || answer === 'always') return 'always';
       return 'no';
+    } finally {
+      this.pendingQuestion = false;
+    }
+  }
+
+  async select(request: SelectRequest): Promise<string | null> {
+    this.stopSpinner();
+    if (request.options.length === 0) return null;
+
+    this.activity(paintToken('brand', request.title));
+    request.options.forEach((option, index) => {
+      const current =
+        option.value === request.selected ? ` ${paintToken('success', '(current)')}` : '';
+      const description = option.description ? ` ${dim(option.description)}` : '';
+      this.activity(
+        `  ${dim(String(index + 1).padStart(2))}. ${option.label}${description}${current}`,
+      );
+    });
+
+    if (!this.interactive || !this.question) return null;
+
+    this.pendingQuestion = true;
+    try {
+      const answer = (await this.question(dim('  Select [number] (Enter to cancel): '))).trim();
+      if (!answer) return null;
+      const number = Number.parseInt(answer, 10);
+      if (Number.isInteger(number) && number >= 1 && number <= request.options.length) {
+        return request.options[number - 1]?.value ?? null;
+      }
+      const lowered = answer.toLowerCase();
+      const match = request.options.find(
+        (option) =>
+          option.value.toLowerCase() === lowered || option.label.toLowerCase() === lowered,
+      );
+      return match?.value ?? null;
     } finally {
       this.pendingQuestion = false;
     }

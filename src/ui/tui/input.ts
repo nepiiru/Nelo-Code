@@ -22,7 +22,7 @@ function sanitizeInput(input: string): string {
 }
 
 /**
- * Single-line input editor with history, used by the TUI.
+ * Multiline input editor with history, used by the TUI.
  * Cursor positions are code-unit indexes but movement respects surrogate pairs.
  */
 export class LineEditor {
@@ -37,11 +37,20 @@ export class LineEditor {
     return this.history.length;
   }
 
+  get isMultiline(): boolean {
+    return this.text.includes('\n');
+  }
+
   insert(input: string): void {
     const clean = sanitizeInput(input);
     if (!clean) return;
     this.text = this.text.slice(0, this.cursor) + clean + this.text.slice(this.cursor);
     this.cursor += clean.length;
+  }
+
+  insertNewline(): void {
+    this.text = `${this.text.slice(0, this.cursor)}\n${this.text.slice(this.cursor)}`;
+    this.cursor += 1;
   }
 
   backspace(): void {
@@ -66,32 +75,55 @@ export class LineEditor {
   }
 
   moveHome(): void {
-    this.cursor = 0;
+    this.cursor = this.lineStartAt(this.cursor);
   }
 
   moveEnd(): void {
-    this.cursor = this.text.length;
+    this.cursor = this.lineEndAt(this.cursor);
+  }
+
+  moveUp(): boolean {
+    const start = this.lineStartAt(this.cursor);
+    if (start === 0) return false;
+    const previousEnd = start - 1;
+    const previousStart = this.lineStartAt(previousEnd);
+    const column = this.cursor - start;
+    this.cursor = this.clampToBoundary(Math.min(previousStart + column, previousEnd));
+    return true;
+  }
+
+  moveDown(): boolean {
+    const end = this.lineEndAt(this.cursor);
+    if (end >= this.text.length) return false;
+    const nextStart = end + 1;
+    const nextEnd = this.lineEndAt(nextStart);
+    const column = this.cursor - this.lineStartAt(this.cursor);
+    this.cursor = this.clampToBoundary(Math.min(nextStart + column, nextEnd));
+    return true;
   }
 
   deleteToStart(): void {
-    this.text = this.text.slice(this.cursor);
-    this.cursor = 0;
+    const start = this.lineStartAt(this.cursor);
+    this.text = this.text.slice(0, start) + this.text.slice(this.cursor);
+    this.cursor = start;
   }
 
   deleteToEnd(): void {
-    this.text = this.text.slice(0, this.cursor);
+    const end = this.lineEndAt(this.cursor);
+    this.text = this.text.slice(0, this.cursor) + this.text.slice(end);
   }
 
   deleteWordBefore(): void {
+    const isSpace = (character: string): boolean => character === ' ' || character === '\n';
     let index = this.cursor;
     while (index > 0) {
       const previous = previousIndex(this.text, index);
-      if (this.text.slice(previous, index) !== ' ') break;
+      if (!isSpace(this.text.slice(previous, index))) break;
       index = previous;
     }
     while (index > 0) {
       const previous = previousIndex(this.text, index);
-      if (this.text.slice(previous, index) === ' ') break;
+      if (isSpace(this.text.slice(previous, index))) break;
       index = previous;
     }
     this.text = this.text.slice(0, index) + this.text.slice(this.cursor);
@@ -108,6 +140,21 @@ export class LineEditor {
   setText(value: string): void {
     this.text = value;
     this.cursor = value.length;
+  }
+
+  private lineStartAt(index: number): number {
+    return this.text.lastIndexOf('\n', index - 1) + 1;
+  }
+
+  private lineEndAt(index: number): number {
+    const end = this.text.indexOf('\n', index);
+    return end === -1 ? this.text.length : end;
+  }
+
+  private clampToBoundary(index: number): number {
+    if (index <= 0 || index >= this.text.length) return index;
+    const code = this.text.charCodeAt(index);
+    return code >= 0xdc00 && code <= 0xdfff ? index - 1 : index;
   }
 
   historyPrevious(): boolean {

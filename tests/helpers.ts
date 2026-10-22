@@ -5,6 +5,7 @@ import type { ModelClient, ModelRequest, ModelResponse, StreamCallbacks } from '
 import type { Config } from '../src/config.js';
 import { defaultConfig } from '../src/config.js';
 import type { PermissionAnswer, PermissionRequest } from '../src/permissions.js';
+import type { SelectRequest } from '../src/ui/ui.js';
 import type { ContentBlock, Tool, ToolContext, UsageTotals } from '../src/types.js';
 import type { UI } from '../src/ui/ui.js';
 
@@ -92,11 +93,17 @@ export class TestUI implements UI {
   readonly errors: string[] = [];
   readonly toolEvents: string[] = [];
   readonly confirmRequests: PermissionRequest[] = [];
+  readonly selectRequests: SelectRequest[] = [];
   textBuffer = '';
   private readonly confirmAnswers: PermissionAnswer[];
+  private readonly selectAnswers: Array<string | null>;
 
-  constructor(confirmAnswers: PermissionAnswer[] = []) {
+  constructor(
+    confirmAnswers: PermissionAnswer[] = [],
+    selectAnswers: Array<string | null> = [],
+  ) {
     this.confirmAnswers = [...confirmAnswers];
+    this.selectAnswers = [...selectAnswers];
   }
 
   text(delta: string): void {
@@ -136,6 +143,11 @@ export class TestUI implements UI {
   async confirm(request: PermissionRequest): Promise<PermissionAnswer> {
     this.confirmRequests.push(request);
     return this.confirmAnswers.shift() ?? 'no';
+  }
+
+  async select(request: SelectRequest): Promise<string | null> {
+    this.selectRequests.push(request);
+    return this.selectAnswers.shift() ?? null;
   }
 
   hasPendingPrompt(): boolean {

@@ -2,18 +2,16 @@ import type { TurnResult } from './agent.js';
 import { connectionHint, connectionProblem, resetSession, resumeSession, type Runtime } from './app.js';
 import {
   MODEL_ALIASES,
+  PERMISSION_MODES,
   parsePermissionMode,
   resolveModelAlias,
   type ProviderId,
 } from './config.js';
-import {
-  describeProvider,
-  isProviderId,
-  listProviderPresets,
-} from './providers.js';
+import { isProviderId, listProviderPresets } from './providers.js';
 import { formatResourceReport } from './system/resources.js';
 import { formatTokenCount, errorMessage, truncate } from './utils/text.js';
 import { runShellCommand } from './utils/exec.js';
+import type { SelectOption } from './ui/ui.js';
 import {
   builtinThemeNames,
   getActiveTheme,
@@ -29,10 +27,6 @@ export function printTurnStats(runtime: Runtime, result: TurnResult): void {
     `${formatTokenCount(result.usage.inputTokens)} in / ${formatTokenCount(result.usage.outputTokens)} out`,
   );
   runtime.ui.stats(parts.join(' · '));
-}
-
-function describeEndpoint(runtime: Runtime): string {
-  return runtime.provider?.baseURL ?? '(not connected)';
 }
 
 async function switchProvider(runtime: Runtime, argument: string): Promise<void> {
@@ -56,6 +50,162 @@ async function switchProvider(runtime: Runtime, argument: string): Promise<void>
     }
   } catch (error) {
     runtime.ui.warn(`Could not switch provider: ${errorMessage(error)}`);
+  }
+}
+
+async function discoverModels(runtime: Runtime): Promise<string[]> {
+  if (!runtime.client.listModels) return [];
+  try {
+    return await runtime.client.listModels();
+  } catch {
+    return [];
+  }
+}
+
+function buildModelOptions(runtime: Runtime, discovered: string[]): SelectOption[] {
+  const current = runtime.config.model;
+  const covered = new Set<string>();
+  const options: SelectOption[] = [];
+
+  if (current) {
+    options.push({ value: current, label: current, description: 'current' });
+    covered.add(current);
+  }
+
+  for (const id of discovered) {
+    if (!id || covered.has(id)) continue;
+    covered.add(id);
+    options.push({
+      value: id,
+      label: id,
+      description: id === current ? 'current · server' : 'server',
+    });
+  }
+
+  // Anthropic aliases are only meaningful for Anthropic or before a provider
+  // has been chosen. OpenAI-compatible endpoints list their own model ids.
+  const includeAliases = !runtime.provider || runtime.provider.preset.kind === 'anthropic';
+  if (includeAliases) {
+    for (const [alias, id] of Object.entries(MODEL_ALIASES)) {
+      if (covered.has(id)) continue;
+      covered.add(id);
+      options.push({
+        value: id,
+        label: alias,
+        description: id === current ? `${id} · current` : id,
+      });
+    }
+  }
+
+  return options;
+}
+
+async function pickModel(runtime: Runtime): Promise<void> {
+  const { ui, config } = runtime;
+  ui.spinner('Loading models…');
+  const options = buildModelOptions(runtime, await discoverModels(runtime));
+  const choice = await ui.select({
+    title: 'Select model',
+    options,
+    selected: config.model,
+  });
+  if (!choice) return;
+
+  config.model = resolveModelAlias(choice);
+  await runtime.saveSession();
+  ui.info(`Model set to ${config.model}.`);
+}
+
+async function pickProvider(runtime: Runtime): Promise<void> {
+  const { ui } = runtime;
+  const current = runtime.provider?.id ?? 'auto';
+  const autoDescription = [
+    'Re-run auto-detection',
+    current === 'auto' ? 'current' : '',
+    runtime.provider ? '' : 'not connected',
+  ]
+    .filter(Boolean)
+    .join(' · ');
+  const options: SelectOption[] = [
+    { value: 'auto', label: 'auto', description: autoDescription },
+    ...listProviderPresets().map((preset) => ({
+      value: preset.id,
+      label: preset.id,
+      description: [
+        preset.label,
+        preset.local ? 'local' : '',
+        preset.id === current ? 'current' : '',
+      ]
+        .filter(Boolean)
+        .join(' · '),
+    })),
+  ];
+  const choice = await ui.select({ title: 'Select provider', options, selected: current });
+  if (!choice) return;
+
+  ui.spinner(choice === 'auto' ? 'Detecting provider…' : `Connecting to ${choice}…`);
+  await switchProvider(runtime, choice);
+  await runtime.saveSession();
+}
+
+async function pickTheme(runtime: Runtime): Promise<void> {
+  const { ui } = runtime;
+  const { themes, errors } = loadThemeAddons(runtime.cwd);
+  const active = getActiveTheme().name;
+  const options: SelectOption[] = [
+    ...builtinThemeNames().map((name) => ({
+      value: name,
+      label: name,
+      description: name === active ? 'built-in · current' : 'built-in',
+    })),
+    ...themes.map((theme) => ({
+      value: theme.name,
+      label: theme.name,
+      description: `${theme.description}${theme.name === active ? ' · current' : ''}`,
+    })),
+  ];
+
+  for (const error of errors) ui.warn(error);
+  const choice = await ui.select({ title: 'Select theme', options, selected: active });
+  if (choice) applyTheme(runtime, choice);
+}
+
+async function pickPermissionMode(runtime: Runtime): Promise<void> {
+  const { ui, config } = runtime;
+  const current = config.permissions.mode;
+  const options: SelectOption[] = PERMISSION_MODES.map((mode) => {
+    const label =
+      mode === 'ask'
+        ? 'Prompt before writes and commands'
+        : mode === 'auto'
+          ? 'Approve everything without asking'
+          : 'Read-only: no writes or commands';
+    return {
+      value: mode,
+      label: mode,
+      description: `${label}${mode === current ? ' · current' : ''}`,
+    };
+  });
+
+  const choice = await ui.select({
+    title: 'Select permission mode',
+    options,
+    selected: current,
+  });
+  if (choice) setPermissionMode(runtime, choice);
+}
+
+function setPermissionMode(runtime: Runtime, mode: string): void {
+  const { ui, config } = runtime;
+  try {
+    config.permissions.mode = parsePermissionMode(mode);
+  } catch (error) {
+    ui.warn(errorMessage(error));
+    return;
+  }
+  ui.info(`Permission mode set to ${config.permissions.mode}.`);
+  if (config.permissions.mode === 'auto') {
+    ui.warn('Auto mode approves all tool calls without asking.');
   }
 }
 
@@ -162,12 +312,7 @@ export async function handleSlashCommand(runtime: Runtime, input: string): Promi
 
     case 'model': {
       if (!argument) {
-        ui.info(`Current model: ${runtime.provider ? config.model || '(none)' : '(none)'}`);
-        ui.info(
-          `Aliases: ${Object.entries(MODEL_ALIASES)
-            .map(([alias, id]) => `${alias} → ${id}`)
-            .join(', ')}`,
-        );
+        await pickModel(runtime);
         return true;
       }
       config.model = resolveModelAlias(argument);
@@ -178,20 +323,7 @@ export async function handleSlashCommand(runtime: Runtime, input: string): Promi
 
     case 'provider': {
       if (!argument) {
-        if (runtime.provider) {
-          ui.info(
-            `Provider: ${runtime.provider.id} · ${config.model} · ${describeEndpoint(runtime)}`,
-          );
-        } else {
-          ui.warn(connectionProblem(runtime) ?? 'No provider is connected.');
-          ui.info(connectionHint(runtime));
-        }
-        ui.raw(
-          listProviderPresets()
-            .map((preset) => `  ${preset.id.padEnd(12)} ${describeProvider(preset)}`)
-            .join('\n'),
-        );
-        ui.info('Switch with /provider <id>, or re-run auto-detection with /provider auto.');
+        await pickProvider(runtime);
         return true;
       }
       await switchProvider(runtime, argument);
@@ -210,7 +342,7 @@ export async function handleSlashCommand(runtime: Runtime, input: string): Promi
 
     case 'theme': {
       if (!argument) {
-        showThemes(runtime);
+        await pickTheme(runtime);
         return true;
       }
       applyTheme(runtime, argument);
@@ -234,22 +366,10 @@ export async function handleSlashCommand(runtime: Runtime, input: string): Promi
 
     case 'permissions': {
       if (!argument) {
-        ui.info(`Permission mode: ${config.permissions.mode}`);
-        ui.info(
-          'Modes: ask (prompt for each mutating tool), auto (approve everything), readonly (no writes or commands).',
-        );
+        await pickPermissionMode(runtime);
         return true;
       }
-      try {
-        config.permissions.mode = parsePermissionMode(argument);
-      } catch (error) {
-        ui.warn(errorMessage(error));
-        return true;
-      }
-      ui.info(`Permission mode set to ${config.permissions.mode}.`);
-      if (config.permissions.mode === 'auto') {
-        ui.warn('Auto mode approves all tool calls without asking.');
-      }
+      setPermissionMode(runtime, argument);
       return true;
     }
 
@@ -347,11 +467,11 @@ export function printHelp(runtime: Runtime): void {
       '  /help               Show this help',
       '  /clear              Start a new conversation',
       '  /compact            Summarize older messages to free context',
-      '  /model [name]       Show or change the model',
-      '  /provider [id]      Show or switch the provider (ollama, lmstudio, …), or "auto"',
+      '  /model [name]       Choose a model, or set it by name',
+      '  /provider [id]      Choose a provider, or switch by id ("auto" re-detects)',
       '  /providers          List provider templates',
-      '  /permissions [mode] Show or set mode: ask | auto | readonly',
-      '  /theme [name|reload] Show, switch or reload UI themes',
+      '  /permissions [mode] Choose or set mode: ask | auto | readonly',
+      '  /theme [name|reload] Choose, switch or reload UI themes',
       '  /themes             List built-in and addon themes',
       '  /addons             List addon directories and loaded addons',
       '  /resources          Show CPU, RAM, GPU and VRAM usage',

@@ -14,7 +14,7 @@ import {
   setActiveTheme,
   type Theme,
 } from '../theme.js';
-import type { UI } from '../ui.js';
+import type { UI, SelectRequest } from '../ui.js';
 import { LineEditor } from './input.js';
 import { formatMarkdown } from './markdown.js';
 import { Screen } from './screen.js';
@@ -47,6 +47,43 @@ interface Key {
   meta?: boolean;
   shift?: boolean;
   sequence?: string;
+}
+
+const CSI_U_PATTERN = /^\x1b\[(\d+)(?::(\d+))?(?:;(\d+)(?::(\d+))?)?u$/;
+
+/**
+ * Converts Kitty/xterm CSI-u key events into the shape Node's readline emits.
+ * Enabling progressive enhancement flag 1 makes Shift+Enter unambiguous but
+ * also turns Ctrl+letter into CSI-u on supporting terminals.
+ */
+function decodeCsiU(key: Key): { str?: string; key: Key } | null {
+  const match = CSI_U_PATTERN.exec(key.sequence ?? '');
+  if (!match) return null;
+
+  const code = Number.parseInt(match[1] ?? '0', 10);
+  const modifiers = match[3] ? Number.parseInt(match[3], 10) - 1 : 0;
+  const base: Key = {
+    ctrl: (modifiers & 4) !== 0,
+    meta: (modifiers & 2) !== 0,
+    shift: (modifiers & 1) !== 0,
+    sequence: key.sequence,
+  };
+
+  if (code === 13) return { str: '\r', key: { ...base, name: 'return' } };
+  if (code === 9) return { str: '\t', key: { ...base, name: 'tab' } };
+  if (code === 27) return { str: '\x1b', key: { ...base, name: 'escape' } };
+  if (code === 8 || code === 127) {
+    return { str: '\x7f', key: { ...base, name: 'backspace' } };
+  }
+  if (code === 32) return { str: ' ', key: { ...base, name: 'space' } };
+  if (code >= 33 && code <= 0x10ffff) {
+    const character = String.fromCodePoint(code);
+    return {
+      str: character,
+      key: { ...base, name: character.length === 1 ? character.toLowerCase() : character },
+    };
+  }
+  return null;
 }
 
 interface ResizableStream extends NodeJS.WriteStream {
@@ -91,6 +128,18 @@ interface ModalState {
   resolve: (answer: PermissionAnswer) => void;
 }
 
+interface SelectorState {
+  request: SelectRequest;
+  index: number;
+  resolve: (value: string | null) => void;
+}
+
+const MAX_INPUT_ROWS = 6;
+const MAX_SELECTOR_ROWS = 10;
+const CURSOR_BLINK_MS = 530;
+const KITTY_KEYBOARD_ON = '\x1b[>1u';
+const KITTY_KEYBOARD_OFF = '\x1b[<u';
+
 export interface TuiStatus {
   model: string;
   mode: string;
@@ -126,6 +175,7 @@ export class TuiUI implements UI {
   private currentAssistant: (AssistantEntry & { cache?: EntryCache }) | null = null;
   private runningTool: (ToolEntry & { cache?: EntryCache }) | null = null;
   private modal: ModalState | null = null;
+  private selector: SelectorState | null = null;
 
   private stateLabel = 'Ready';
   private busy = false;
@@ -147,6 +197,9 @@ export class TuiUI implements UI {
   private renderTimer: NodeJS.Timeout | null = null;
   private spinnerTimer: NodeJS.Timeout | null = null;
   private spinnerFrame = 0;
+  private blinkTimer: NodeJS.Timeout | null = null;
+  private cursorVisible = true;
+  private kittyKeyboard = false;
 
   private status: TuiStatus = {
     model: '',
@@ -166,6 +219,7 @@ export class TuiUI implements UI {
   };
 
   private readonly onProcessExit = (): void => {
+    this.writeKittyKeyboard(false);
     this.screen.stop();
   };
 
@@ -181,6 +235,7 @@ export class TuiUI implements UI {
     this.started = true;
 
     this.screen.start();
+    this.writeKittyKeyboard(true);
     emitKeypressEvents(this.stdin);
     (this.stdin as NodeJS.ReadStream & { setRawMode?: (mode: boolean) => void }).setRawMode?.(true);
     this.stdin.resume();
@@ -188,12 +243,23 @@ export class TuiUI implements UI {
     (this.screen.stream as ResizableStream).on('resize', this.onResize);
     process.on('exit', this.onProcessExit);
 
+    this.blinkTimer = setInterval(() => {
+      if (!this.started || this.modal || this.selector) return;
+      this.cursorVisible = !this.cursorVisible;
+      this.requestRender();
+    }, CURSOR_BLINK_MS);
+    this.blinkTimer.unref?.();
+
     this.requestRender();
   }
 
   stop(): void {
     if (!this.started) return;
     this.started = false;
+
+    const pendingSelector = this.selector;
+    this.selector = null;
+    pendingSelector?.resolve(null);
 
     (this.stdin as NodeJS.EventEmitter).off('keypress', this.onKeypress);
     (this.screen.stream as ResizableStream).off('resize', this.onResize);
@@ -207,6 +273,10 @@ export class TuiUI implements UI {
       clearInterval(this.spinnerTimer);
       this.spinnerTimer = null;
     }
+    if (this.blinkTimer) {
+      clearInterval(this.blinkTimer);
+      this.blinkTimer = null;
+    }
     this.renderScheduled = false;
 
     try {
@@ -215,11 +285,19 @@ export class TuiUI implements UI {
       // Ignore terminals that reject raw-mode changes during teardown.
     }
     this.stdin.pause();
+    this.writeKittyKeyboard(false);
     this.screen.stop();
+  }
+
+  private writeKittyKeyboard(enabled: boolean): void {
+    if (this.kittyKeyboard === enabled || !this.screen.stream.isTTY) return;
+    this.kittyKeyboard = enabled;
+    this.screen.stream.write(enabled ? KITTY_KEYBOARD_ON : KITTY_KEYBOARD_OFF);
   }
 
   readLine(): Promise<string | null> {
     if (this.disposed) return Promise.resolve(null);
+    this.cursorVisible = true;
     const queued = this.queuedLines.shift();
     if (queued !== undefined) return Promise.resolve(queued);
     return new Promise<string | null>((resolve) => {
@@ -390,19 +468,49 @@ export class TuiUI implements UI {
     });
   }
 
+  async select(request: SelectRequest): Promise<string | null> {
+    if (!this.started || request.options.length === 0) return null;
+    this.finishAssistant();
+    const selected = request.selected
+      ? request.options.findIndex((option) => option.value === request.selected)
+      : 0;
+    return new Promise<string | null>((resolve) => {
+      this.selector = {
+        request,
+        index: selected >= 0 ? selected : 0,
+        resolve,
+      };
+      this.cursorVisible = true;
+      this.setState('Selecting…', false);
+      this.requestRender();
+    });
+  }
+
   hasPendingPrompt(): boolean {
-    return this.modal !== null;
+    return this.modal !== null || this.selector !== null;
   }
 
   // -------------------------------------------------------------- key handling
 
   private handleKey(str: string | undefined, key: Key): void {
     if (!this.started) return;
+    const decoded = decodeCsiU(key);
+    if (decoded) {
+      str = decoded.str;
+      key = decoded.key;
+    }
+
+    if (this.selector) {
+      this.handleSelectorKey(str, key);
+      return;
+    }
 
     if (this.modal) {
       this.handleModalKey(str, key);
       return;
     }
+
+    this.cursorVisible = true;
 
     if (this.handleScrollKey(key)) return;
 
@@ -420,6 +528,13 @@ export class TuiUI implements UI {
     if (key.ctrl && key.name === 'd') {
       if (this.editor.text.length === 0) this.exit();
       else this.editor.delete();
+      this.requestRender();
+      return;
+    }
+
+    if (this.isNewlineKey(key)) {
+      this.editor.insertNewline();
+      this.resetSlashState();
       this.requestRender();
       return;
     }
@@ -532,9 +647,17 @@ export class TuiUI implements UI {
         return true;
       case 'up':
         this.resetSlashState();
+        if (this.editor.isMultiline) {
+          this.editor.moveUp();
+          return true;
+        }
         return this.editor.historyPrevious();
       case 'down':
         this.resetSlashState();
+        if (this.editor.isMultiline) {
+          this.editor.moveDown();
+          return true;
+        }
         return this.editor.historyNext();
       default:
         break;
@@ -571,12 +694,31 @@ export class TuiUI implements UI {
     this.slashDismissed = false;
   }
 
+  /** True for Shift+Enter and the escape sequences terminals use to encode it. */
+  private isNewlineKey(key: Key): boolean {
+    const name = (key.name ?? '').toLowerCase();
+    if ((name === 'enter' || name === 'return') && key.shift) return true;
+    // ESC CR is what several terminals send for Shift+Enter / Alt+Enter.
+    if (name === 'return' && key.meta) return true;
+    // LF arrives as its own Enter event (Ctrl+J or unmodified Shift+Enter).
+    if (name === 'enter') return true;
+    // Ctrl+J is the portable fallback recommended by terminal protocol docs.
+    if (name === 'j' && key.ctrl) return true;
+
+    // Kitty / CSI-u: ESC [ 13 ; modifiers u. Shift is bit 1.
+    const sequence = key.sequence ?? '';
+    const match = /^\x1b\[13;(\d+)[u~]$/.exec(sequence);
+    if (!match) return false;
+    const modifiers = Number.parseInt(match[1] ?? '0', 10) - 1;
+    return (modifiers & 1) === 1;
+  }
+
   /** Commands matching the current input, or none while it is not a command prefix. */
   private slashMatches(includeDismissed = false): string[] {
     if (!includeDismissed && this.slashDismissed) return [];
-    if (this.modal) return [];
+    if (this.modal || this.selector) return [];
     const text = this.editor.text;
-    if (!text.startsWith('/') || text.includes(' ')) return [];
+    if (!text.startsWith('/') || text.includes(' ') || text.includes('\n')) return [];
     if (this.editor.cursor !== text.length) return [];
     return SLASH_COMMANDS.filter((command) => command.startsWith(text));
   }
@@ -639,6 +781,7 @@ export class TuiUI implements UI {
   }
 
   private submit(): void {
+    this.cursorVisible = true;
     const value = this.editor.submit();
     this.resetSlashState();
     if (!value) {
@@ -694,10 +837,79 @@ export class TuiUI implements UI {
     }
   }
 
+  private handleSelectorKey(str: string | undefined, key: Key): void {
+    const selector = this.selector;
+    if (!selector) return;
+    const options = selector.request.options;
+    if (options.length === 0) {
+      this.closeSelector(null);
+      return;
+    }
+
+    const name = (key.name ?? '').toLowerCase();
+    const page = Math.max(1, this.selectorVisibleCount());
+    if (name === 'up' || (!key.ctrl && !key.meta && str === 'k')) {
+      selector.index = (selector.index - 1 + options.length) % options.length;
+      this.requestRender();
+      return;
+    }
+    if (name === 'down' || (!key.ctrl && !key.meta && str === 'j')) {
+      selector.index = (selector.index + 1) % options.length;
+      this.requestRender();
+      return;
+    }
+    if (name === 'pageup') {
+      selector.index = Math.max(0, selector.index - page);
+      this.requestRender();
+      return;
+    }
+    if (name === 'pagedown') {
+      selector.index = Math.min(options.length - 1, selector.index + page);
+      this.requestRender();
+      return;
+    }
+    if (name === 'home') {
+      selector.index = 0;
+      this.requestRender();
+      return;
+    }
+    if (name === 'end') {
+      selector.index = options.length - 1;
+      this.requestRender();
+      return;
+    }
+    if (name === 'enter' || name === 'return') {
+      this.closeSelector(options[selector.index]?.value ?? null);
+      return;
+    }
+    if (name === 'escape' || (key.ctrl && name === 'c')) {
+      this.closeSelector(null);
+      return;
+    }
+    if (!key.ctrl && !key.meta && str && /^[1-9]$/.test(str)) {
+      const index = Number.parseInt(str, 10) - 1;
+      if (index < options.length) {
+        selector.index = index;
+        this.requestRender();
+      }
+    }
+  }
+
+  private closeSelector(value: string | null): void {
+    const selector = this.selector;
+    if (!selector) return;
+    this.selector = null;
+    this.cursorVisible = true;
+    this.setState('Ready', false);
+    this.requestRender();
+    selector.resolve(value);
+  }
+
   private resolveModal(answer: PermissionAnswer): void {
     const modal = this.modal;
     if (!modal) return;
     this.modal = null;
+    this.cursorVisible = true;
     this.setState(this.running ? 'Working' : 'Ready', this.running);
     this.requestRender();
     modal.resolve(answer);
@@ -746,12 +958,43 @@ export class TuiUI implements UI {
   /** Rows used by the header, rules, input box and status bar. */
   private chromeRows(): number {
     const theme = getActiveTheme();
-    let rows = 4; // boxed input (3 rows) + status
+    let rows = 2 + this.inputRowCount() + 1; // box borders + content rows + status
     if (theme.layout.header) rows += 1;
     if (theme.layout.separators) rows += 2;
     if (this.modal) rows += 5;
+    if (this.selector) rows += this.selectorRows();
     rows += Math.min(this.slashMatches().length, 6);
     return rows;
+  }
+
+  private inputRowCount(): number {
+    if (this.modal || this.selector) return 1;
+    return Math.min(this.maxInputRows(), this.editor.text.split('\n').length);
+  }
+
+  private maxInputRows(): number {
+    const theme = getActiveTheme();
+    let chrome = 3; // box borders + status bar
+    if (theme.layout.header) chrome += 1;
+    if (theme.layout.separators) chrome += 2;
+    return Math.max(1, Math.min(MAX_INPUT_ROWS, this.screen.rows - chrome - 1));
+  }
+
+  private selectorVisibleCount(): number {
+    const total = this.selector?.request.options.length ?? 0;
+    if (total === 0) return 1;
+    const theme = getActiveTheme();
+    let chrome = 4; // single-row input box + status
+    if (theme.layout.header) chrome += 1;
+    if (theme.layout.separators) chrome += 2;
+    if (this.modal) chrome += 5;
+    // Selector frame is 3 rows; keep at least one transcript row visible.
+    const available = this.screen.rows - chrome - 4;
+    return Math.max(1, Math.min(total, MAX_SELECTOR_ROWS, available));
+  }
+
+  private selectorRows(): number {
+    return this.selectorVisibleCount() + 3;
   }
 
   private transcriptHeight(): number {
@@ -834,6 +1077,7 @@ export class TuiUI implements UI {
     lines.push(...visible);
     if (theme.layout.separators) lines.push(separator);
     if (this.modal) lines.push(...this.renderModal(width));
+    if (this.selector) lines.push(...this.renderSelector(width));
     lines.push(...this.renderCompletions(width));
     lines.push(...this.renderInput(width));
     lines.push(this.renderStatus(width));
@@ -870,6 +1114,7 @@ export class TuiUI implements UI {
     const hints = [
       `${paintToken('accent', '/')} ${dim('commands')}`,
       `${paintToken('accentAlt', 'Enter')} ${dim('send')}`,
+      `${paintToken('accentAlt', 'Shift+Enter')} ${dim('newline')}`,
       `${paintToken('accentAlt', 'Tab')} ${dim('complete')}`,
     ].join(dim('   ·   '));
     const card = ['', title, subtitle, '', hints, ''];
@@ -1002,15 +1247,19 @@ export class TuiUI implements UI {
   private renderInput(width: number): string[] {
     const inner = Math.max(1, width - 4);
     const prompt = `${paintToken('accent', glyph('prompt'))} `;
-    let content: string;
+    let rows: string[];
 
     if (this.modal) {
-      content = `${prompt}${dim('Waiting for approval…')}`;
+      rows = [`${prompt}${dim('Waiting for approval…')}`];
+    } else if (this.selector) {
+      rows = [`${prompt}${dim('Waiting for selection…')}`];
     } else if (this.editor.text.length === 0) {
       const hint = this.running ? 'Type to queue the next message…' : 'Ask Nelo Code to do something…';
-      content = `${prompt}${dim(hint)}`;
+      const cursor = this.cursorVisible ? inverse(glyph('cursor')) : ' ';
+      rows = [`${prompt}${cursor}${dim(hint)}`];
     } else {
-      content = `${prompt}${this.renderEditorText(Math.max(1, inner - 3))}`;
+      const lines = this.renderEditorRows(Math.max(1, inner - 3));
+      rows = lines.map((line, index) => `${index === 0 ? prompt : '  '}${line}`);
     }
 
     const horizontal = glyph('boxHorizontal').repeat(Math.max(0, width - 2));
@@ -1023,47 +1272,137 @@ export class TuiUI implements UI {
       `${glyph('boxBottomLeft')}${horizontal}${glyph('boxBottomRight')}`,
     );
     const vertical = paintToken('border', glyph('boxVertical'));
-    const row = `${vertical} ${padToWidth(truncateAnsi(content, inner), inner)} ${vertical}`;
-    return [top, row, bottom];
+    const body = rows.map(
+      (content) => `${vertical} ${padToWidth(truncateAnsi(content, inner), inner)} ${vertical}`,
+    );
+    return [top, ...body, bottom];
   }
 
-  private renderEditorText(available: number): string {
-    const width = Math.max(1, available);
+  /** Renders the visible window of logical input lines, keeping the cursor in view. */
+  private renderEditorRows(available: number): string[] {
     const text = this.editor.text;
     const cursor = this.editor.cursor;
+    const lines = text.split('\n');
+    const beforeCursor = text.slice(0, cursor);
+    const cursorLine = beforeCursor.split('\n').length - 1;
+    const cursorColumn = cursor - (beforeCursor.lastIndexOf('\n') + 1);
+    const visibleCount = Math.min(this.maxInputRows(), lines.length);
+    const offset = Math.max(
+      0,
+      Math.min(cursorLine - visibleCount + 1, lines.length - visibleCount),
+    );
+
+    const rows: string[] = [];
+    for (let index = offset; index < offset + visibleCount; index++) {
+      const line = lines[index] ?? '';
+      rows.push(
+        index === cursorLine
+          ? this.renderEditorLine(line, cursorColumn, available)
+          : truncateAnsi(line, available),
+      );
+    }
+    return rows;
+  }
+
+  private renderEditorLine(line: string, cursor: number, available: number): string {
+    const width = Math.max(1, available);
+    const boundedCursor = Math.max(0, Math.min(cursor, line.length));
 
     let start = 0;
-    while (start < cursor && stringWidth(text.slice(start, cursor)) > width - 1) {
-      const code = text.charCodeAt(start);
+    while (
+      start < boundedCursor &&
+      stringWidth(line.slice(start, boundedCursor)) > width - 1
+    ) {
+      const code = line.charCodeAt(start);
       start += code >= 0xd800 && code <= 0xdbff ? 2 : 1;
     }
 
     let end = start;
     let used = 0;
-    while (end < text.length) {
-      const codePoint = text.codePointAt(end) ?? 0;
+    while (end < line.length) {
+      const codePoint = line.codePointAt(end) ?? 0;
       const characterWidth = charWidth(codePoint);
       if (used + characterWidth > width) break;
       used += characterWidth;
-      const code = text.charCodeAt(end);
+      const code = line.charCodeAt(end);
       end += code >= 0xd800 && code <= 0xdbff ? 2 : 1;
     }
 
     let output = '';
     let cursorRendered = false;
     for (let index = start; index < end; ) {
-      const codePoint = text.codePointAt(index) ?? 0;
+      const codePoint = line.codePointAt(index) ?? 0;
       const character = String.fromCodePoint(codePoint);
-      if (index === cursor) {
-        output += inverse(character);
+      if (index === boundedCursor) {
+        output += this.cursorVisible ? inverse(character) : character;
         cursorRendered = true;
       } else {
         output += character;
       }
       index += character.length;
     }
-    if (!cursorRendered) output += inverse(glyph('cursor'));
+    if (!cursorRendered && this.cursorVisible) output += inverse(glyph('cursor'));
     return output;
+  }
+
+  private renderSelector(width: number): string[] {
+    const selector = this.selector;
+    if (!selector) return [];
+
+    const options = selector.request.options;
+    const total = options.length;
+    const visibleCount = this.selectorVisibleCount();
+    const selected = Math.max(0, Math.min(selector.index, Math.max(0, total - 1)));
+    const offset = Math.max(
+      0,
+      Math.min(selected - visibleCount + 1, Math.max(0, total - visibleCount)),
+    );
+    const boxWidth = Math.min(width - 4, 76);
+    const inner = boxWidth - 4;
+    const horizontal = glyph('boxHorizontal');
+    const vertical = paintToken('border', glyph('boxVertical'));
+    const title = ` ${stripAnsi(selector.request.title)} `;
+    const top = `${paintToken('border', `${glyph('boxTopLeft')}${horizontal}`)}${paintToken(
+      'accentAlt',
+      title,
+    )}${paintToken(
+      'border',
+      `${horizontal.repeat(Math.max(0, boxWidth - title.length - 3))}${glyph('boxTopRight')}`,
+    )}`;
+    const bottom = paintToken(
+      'border',
+      `${glyph('boxBottomLeft')}${horizontal.repeat(Math.max(0, boxWidth - 2))}${glyph(
+        'boxBottomRight',
+      )}`,
+    );
+    const row = (text: string): string =>
+      `${vertical} ${padToWidth(truncateAnsi(text, inner), inner)} ${vertical}`;
+
+    const lines: string[] = [top];
+    if (total === 0) {
+      lines.push(row(dim('(no options)')));
+    } else {
+      for (let position = 0; position < visibleCount; position++) {
+        const index = offset + position;
+        const option = options[index];
+        if (!option) continue;
+        const isSelected = index === selected;
+        const marker = isSelected ? paintToken('accentAlt', glyph('prompt')) : ' ';
+        const label = isSelected ? bold(paintToken('accentAlt', option.label)) : option.label;
+        const description = option.description ? `  ${dim(option.description)}` : '';
+        lines.push(row(`${marker} ${label}${description}`));
+      }
+    }
+
+    const help = paintToken('dim', 'Up/Down · Enter · Esc');
+    const counter = paintToken('muted', `${total > 0 ? selected + 1 : 0}/${total}`);
+    const gap = Math.max(1, inner - stringWidth(help) - stringWidth(counter));
+    lines.push(row(`${help}${' '.repeat(gap)}${counter}`));
+    lines.push(bottom);
+
+    const leftPad = Math.max(0, Math.floor((width - boxWidth) / 2));
+    const prefix = ' '.repeat(leftPad);
+    return lines.map((line) => truncateAnsi(`${prefix}${line}`, width));
   }
 
   private renderStatus(width: number): string {

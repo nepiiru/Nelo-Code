@@ -26,6 +26,8 @@ export interface ModelResponse {
 
 export interface ModelClient {
   stream(request: ModelRequest, callbacks: StreamCallbacks, signal?: AbortSignal): Promise<ModelResponse>;
+  /** Optional: list model ids exposed by the endpoint. */
+  listModels?(): Promise<string[]>;
 }
 
 export interface AnthropicClientOptions {

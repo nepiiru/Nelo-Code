@@ -14,6 +14,14 @@ class MemoryStream {
 
 const writeTool = dummyTool('write_file', false);
 const request = { tool: writeTool, input: { path: 'a.txt' }, summary: 'a.txt' };
+const selectRequest = {
+  title: 'Select model',
+  options: [
+    { value: 'a', label: 'alpha' },
+    { value: 'b', label: 'beta', description: 'second' },
+  ],
+  selected: 'a',
+};
 
 function buildUI(interactive: boolean, answer = '') {
   const stdout = new MemoryStream();
@@ -50,6 +58,42 @@ describe('TerminalUI.confirm', () => {
     await ui.confirm(request);
     expect(stdout.output).toContain('write_file');
     expect(stdout.output).toContain('a.txt');
+    expect(ui.hasPendingPrompt()).toBe(false);
+  });
+});
+
+describe('TerminalUI.select', () => {
+  it('lists options and cancels in non-interactive mode', async () => {
+    const { ui, stderr } = buildUI(false);
+    await expect(ui.select(selectRequest)).resolves.toBeNull();
+    expect(stderr.output).toContain('Select model');
+    expect(stderr.output).toContain('alpha');
+    expect(stderr.output).toContain('beta');
+    expect(stderr.output).toContain('second');
+  });
+
+  it('accepts numbers and labels', async () => {
+    await expect(buildUI(true, '2').ui.select(selectRequest)).resolves.toBe('b');
+    await expect(buildUI(true, 'alpha').ui.select(selectRequest)).resolves.toBe('a');
+    await expect(buildUI(true, '').ui.select(selectRequest)).resolves.toBeNull();
+  });
+
+  it('tracks the pending prompt while waiting for an answer', async () => {
+    let answer!: (value: string) => void;
+    const question = new Promise<string>((resolve) => {
+      answer = resolve;
+    });
+    const ui = new TerminalUI({
+      stdout: new MemoryStream() as unknown as NodeJS.WriteStream,
+      stderr: new MemoryStream() as unknown as NodeJS.WriteStream,
+      interactive: true,
+      question: () => question,
+    });
+
+    const pending = ui.select(selectRequest);
+    expect(ui.hasPendingPrompt()).toBe(true);
+    answer('1');
+    await expect(pending).resolves.toBe('a');
     expect(ui.hasPendingPrompt()).toBe(false);
   });
 });

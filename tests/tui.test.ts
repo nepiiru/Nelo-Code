@@ -195,6 +195,166 @@ describe('TuiUI', () => {
     }
   });
 
+  it('inserts a newline with Shift+Enter and submits multiline input', async () => {
+    const { tui, stdin, stdout } = makeTui();
+    tui.start();
+
+    try {
+      const linePromise = tui.readLine();
+      stdin.emit('keypress', 'a', { name: 'a' });
+      stdin.emit('keypress', '\r', { name: 'return', shift: true });
+      stdin.emit('keypress', 'b', { name: 'b' });
+      await wait(60);
+
+      const frame = lastFrame(stdout.text());
+      expect(frame).toContain('❯ a');
+      expect(frame).toContain('  b');
+
+      stdin.emit('keypress', '\r', { name: 'return' });
+      await expect(linePromise).resolves.toBe('a\nb');
+    } finally {
+      tui.stop();
+    }
+  });
+
+  it('accepts the CSI-u encoding of Shift+Enter', async () => {
+    const { tui, stdin } = makeTui();
+    tui.start();
+
+    try {
+      const linePromise = tui.readLine();
+      stdin.emit('keypress', 'a', { name: 'a' });
+      stdin.emit('keypress', undefined, { sequence: '\x1b[13;2u' });
+      stdin.emit('keypress', 'b', { name: 'b' });
+      stdin.emit('keypress', '\r', { name: 'return' });
+
+      await expect(linePromise).resolves.toBe('a\nb');
+    } finally {
+      tui.stop();
+    }
+  });
+
+  it('decodes CSI-u control keys and Enter', async () => {
+    const { tui, stdin } = makeTui();
+    tui.start();
+
+    try {
+      const linePromise = tui.readLine();
+      stdin.emit('keypress', 'x', { name: 'x' });
+      stdin.emit('keypress', undefined, { sequence: '\x1b[99;5u' }); // Ctrl+C
+      stdin.emit('keypress', 'o', { name: 'o' });
+      stdin.emit('keypress', undefined, { sequence: '\x1b[13u' }); // Enter
+
+      await expect(linePromise).resolves.toBe('o');
+    } finally {
+      tui.stop();
+    }
+  });
+
+  it('enables and restores the kitty keyboard protocol', () => {
+    const { tui, stdout } = makeTui();
+    tui.start();
+    expect(stdout.text()).toContain('\x1b[>1u');
+    tui.stop();
+    expect(stdout.text()).toContain('\x1b[<u');
+  });
+
+  it('caps multiline input height on short terminals', async () => {
+    const { tui, stdin, stdout } = makeTui();
+    stdout.rows = 12;
+    tui.start();
+
+    try {
+      const linePromise = tui.readLine();
+      for (let line = 0; line < 7; line += 1) {
+        stdin.emit('keypress', 'x', { name: 'x' });
+        if (line < 6) stdin.emit('keypress', '\r', { name: 'return', shift: true });
+      }
+      await wait(60);
+
+      const frame = lastFrame(stdout.text());
+      const positions = [...frame.matchAll(/\x1b\[(\d+);1H/g)].map((match) =>
+        Number.parseInt(match[1] ?? '0', 10),
+      );
+      expect(Math.max(...positions)).toBeLessThanOrEqual(12);
+
+      stdin.emit('keypress', '\r', { name: 'return' });
+      await expect(linePromise).resolves.toBe(Array.from({ length: 7 }, () => 'x').join('\n'));
+    } finally {
+      tui.stop();
+    }
+  });
+
+  it('blinks the input cursor', async () => {
+    const previousForce = process.env.FORCE_COLOR;
+    delete process.env.NO_COLOR;
+    process.env.FORCE_COLOR = '1';
+    const { tui, stdout } = makeTui();
+    tui.start();
+
+    try {
+      await wait(80);
+      expect(lastFrame(stdout.text())).toContain('\x1b[7m');
+
+      await wait(560);
+      expect(lastFrame(stdout.text())).not.toContain('\x1b[7m');
+    } finally {
+      tui.stop();
+      process.env.NO_COLOR = '1';
+      if (previousForce === undefined) delete process.env.FORCE_COLOR;
+      else process.env.FORCE_COLOR = previousForce;
+    }
+  });
+
+  it('shows a selection window and resolves the highlighted option', async () => {
+    const { tui, stdin, stdout } = makeTui();
+    tui.start();
+
+    try {
+      const choice = tui.select({
+        title: 'Select provider',
+        options: [
+          { value: 'auto', label: 'auto', description: 'Re-run detection' },
+          { value: 'ollama', label: 'ollama', description: 'local · current' },
+          { value: 'openai', label: 'openai', description: 'cloud' },
+        ],
+        selected: 'ollama',
+      });
+
+      await wait(60);
+      const frame = lastFrame(stdout.text());
+      expect(frame).toContain('Select provider');
+      expect(frame).toContain('Re-run detection');
+      expect(frame).toContain('2/3');
+      expect(frame).toContain('Up/Down · Enter · Esc');
+      expect(tui.hasPendingPrompt()).toBe(true);
+
+      stdin.emit('keypress', '\x1b[B', { name: 'down' });
+      stdin.emit('keypress', '\r', { name: 'return' });
+      await expect(choice).resolves.toBe('openai');
+      expect(tui.hasPendingPrompt()).toBe(false);
+    } finally {
+      tui.stop();
+    }
+  });
+
+  it('cancels a selection window with Escape', async () => {
+    const { tui, stdin } = makeTui();
+    tui.start();
+
+    try {
+      const choice = tui.select({
+        title: 'Select model',
+        options: [{ value: 'sonnet', label: 'sonnet' }],
+        selected: 'sonnet',
+      });
+      stdin.emit('keypress', '\x1b', { name: 'escape' });
+      await expect(choice).resolves.toBeNull();
+    } finally {
+      tui.stop();
+    }
+  });
+
   it('shows slash-command completions as soon as "/" is typed', async () => {
     const { tui, stdin, stdout } = makeTui();
     tui.start();
